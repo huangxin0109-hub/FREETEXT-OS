@@ -19,171 +19,96 @@ function jsonResponse(body, status = 200) {
 }
 
 function errorResponse(code, message, status = 500) {
-  return jsonResponse(
-    {
-      source: "deepseek",
-      error: { code, message },
-    },
-    status,
-  );
+  return jsonResponse({ source: "deepseek", error: { code, message } }, status);
 }
 
 function validateInput(input) {
-  if (!input || !Array.isArray(input.books)) {
-    return "books 必须是数组";
-  }
-  if (input.books.length < 1 || input.books.length > 20) {
-    return "每次必须提交 1 至 20 本候选书";
-  }
-  if (
-    input.books.some(
-      (book) => !book || book.id === undefined || !book.title || !book.description,
-    )
-  ) {
-    return "每本书都必须包含 id、title 和 description";
-  }
+  if (!input || !Array.isArray(input.books)) return "books 必须是数组";
+  if (input.books.length < 1 || input.books.length > 20) return "每次必须提交 1 至 20 本候选书";
+  if (input.books.some((book) => !book || book.id === undefined || !book.title)) return "每本书都必须包含 id 和 title";
   return null;
 }
 
 function normalizeStringArray(value) {
-  return Array.isArray(value)
-    ? value.filter((item) => typeof item === "string").slice(0, 10)
-    : [];
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string").slice(0, 10) : [];
+}
+
+function normalizeEnrichedFields(value) {
+  const fields = ["author", "publisher", "publish_date", "category", "description", "price"];
+  return Object.fromEntries(fields.map((field) => [field, typeof value?.[field] === "string" && value[field].trim() ? value[field].trim() : "待人工确认"]));
 }
 
 function normalizeResults(payload, books) {
-  if (!payload || !Array.isArray(payload.results)) {
-    throw new Error("DeepSeek 未返回有效的 results 数组");
-  }
-
-  const resultById = new Map(
-    payload.results.map((result) => [String(result?.id), result]),
-  );
-
+  if (!payload || !Array.isArray(payload.results)) throw new Error("DeepSeek 未返回有效的 results 数组");
+  const resultById = new Map(payload.results.map((result) => [String(result?.id), result]));
   return books.map((book) => {
     const result = resultById.get(String(book.id));
-    if (!result || !ALLOWED_RATINGS.has(result.rating)) {
-      throw new Error(`书籍 ${book.id} 缺少有效的 A/B/C/D 判断`);
-    }
-
+    if (!result || !ALLOWED_RATINGS.has(result.rating)) throw new Error(`书籍 ${book.id} 缺少有效的 A/B/C/D 判断`);
     return {
       id: book.id,
       rating: result.rating,
-      candidate_decision:
-        typeof result.candidate_decision === "string"
-          ? result.candidate_decision
-          : "需要人工判断",
-      reason:
-        typeof result.reason === "string" ? result.reason : "需要人工进一步判断",
+      candidate_decision: typeof result.candidate_decision === "string" ? result.candidate_decision : "需要人工判断",
+      reason: typeof result.reason === "string" ? result.reason : "需要人工进一步判断",
       risks: normalizeStringArray(result.risks),
-      shelf_theme:
-        typeof result.shelf_theme === "string" ? result.shelf_theme : "待人工确认",
+      shelf_theme: typeof result.shelf_theme === "string" ? result.shelf_theme : "待人工确认",
       needs_human_review: true,
       human_review_questions: normalizeStringArray(result.human_review_questions),
       missing_information: normalizeStringArray(result.missing_information),
+      enriched_fields: normalizeEnrichedFields(result.enriched_fields),
+      enrichment_confidence: ["高", "中", "低"].includes(result.enrichment_confidence) ? result.enrichment_confidence : "低",
+      enrichment_notes: normalizeStringArray(result.enrichment_notes),
     };
   });
 }
 
 async function requestDeepSeek(apiKey, input) {
   let lastError;
-
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     try {
       const response = await fetch(DEEPSEEK_API_URL, {
         method: "POST",
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          "content-type": "application/json",
-        },
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
         body: JSON.stringify({
           model: "deepseek-chat",
           response_format: { type: "json_object" },
           temperature: 0.2,
           max_tokens: 8192,
           messages: [
-            {
-              role: "system",
-              content:
-                "严格执行 FREETEXT 选书规则。只做辅助初筛，所有结果必须经过人工复核。",
-            },
-            {
-              role: "user",
-              content: buildScreeningPrompt(input),
-            },
+            { role: "system", content: "严格执行 FREETEXT 选书规则。只做辅助初筛，所有结果必须经过人工复核。" },
+            { role: "user", content: buildScreeningPrompt(input) },
           ],
         }),
       });
-
-      if (!response.ok) {
-        throw new Error(`DeepSeek API 返回 ${response.status}`);
-      }
-
+      if (!response.ok) throw new Error(`DeepSeek API 返回 ${response.status}`);
       const deepseekPayload = await response.json();
       const content = deepseekPayload?.choices?.[0]?.message?.content;
-      if (typeof content !== "string") {
-        throw new Error("DeepSeek 未返回有效内容");
-      }
-
+      if (typeof content !== "string") throw new Error("DeepSeek 未返回有效内容");
       const parsed = JSON.parse(content);
-      return {
-        results: normalizeResults(parsed, input.books),
-        commonRisks: normalizeStringArray(parsed.summary?.common_risks),
-        rulesToReview: normalizeStringArray(parsed.summary?.rules_to_review),
-      };
+      return { results: normalizeResults(parsed, input.books), commonRisks: normalizeStringArray(parsed.summary?.common_risks), rulesToReview: normalizeStringArray(parsed.summary?.rules_to_review) };
     } catch (error) {
       lastError = error;
       console.error(`DeepSeek screening attempt ${attempt} failed:`, error);
     }
   }
-
   throw lastError;
 }
 
 function splitIntoBatches(books) {
   const batches = [];
-  for (let index = 0; index < books.length; index += BATCH_SIZE) {
-    batches.push(books.slice(index, index + BATCH_SIZE));
-  }
+  for (let index = 0; index < books.length; index += BATCH_SIZE) batches.push(books.slice(index, index + BATCH_SIZE));
   return batches;
 }
 
 export async function onRequestPost(context) {
-  if (!context.env.DEEPSEEK_API_KEY) {
-    return errorResponse(
-      "DEEPSEEK_KEY_MISSING",
-      "DeepSeek 暂时不可用，可使用备用演示数据",
-      503,
-    );
-  }
-
+  if (!context.env.DEEPSEEK_API_KEY) return errorResponse("DEEPSEEK_KEY_MISSING", "DeepSeek 暂时不可用，可使用备用演示数据", 503);
   let input;
-  try {
-    input = await context.request.json();
-  } catch {
-    return errorResponse("INVALID_JSON", "请求内容不是有效 JSON", 400);
-  }
-
+  try { input = await context.request.json(); } catch { return errorResponse("INVALID_JSON", "请求内容不是有效 JSON", 400); }
   const validationError = validateInput(input);
-  if (validationError) {
-    return errorResponse("INVALID_INPUT", validationError, 400);
-  }
-
+  if (validationError) return errorResponse("INVALID_INPUT", validationError, 400);
   try {
-    const batches = splitIntoBatches(input.books);
-    const batchResults = await Promise.all(
-      batches.map((books) =>
-        requestDeepSeek(context.env.DEEPSEEK_API_KEY, { ...input, books }),
-      ),
-    );
+    const batchResults = await Promise.all(splitIntoBatches(input.books).map((books) => requestDeepSeek(context.env.DEEPSEEK_API_KEY, { ...input, books })));
     const results = batchResults.flatMap((batch) => batch.results);
-    const ratingCounts = Object.fromEntries(
-      ["A", "B", "C", "D"].map((rating) => [
-        rating,
-        results.filter((result) => result.rating === rating).length,
-      ]),
-    );
-
+    const ratingCounts = Object.fromEntries(["A", "B", "C", "D"].map((rating) => [rating, results.filter((result) => result.rating === rating).length]));
     return jsonResponse({
       source: "deepseek",
       rule_version: RULE_VERSION,
@@ -191,21 +116,13 @@ export async function onRequestPost(context) {
       summary: {
         total: results.length,
         rating_counts: ratingCounts,
-        common_risks: [
-          ...new Set(batchResults.flatMap((batch) => batch.commonRisks)),
-        ].slice(0, 10),
-        rules_to_review: [
-          ...new Set(batchResults.flatMap((batch) => batch.rulesToReview)),
-        ].slice(0, 10),
+        common_risks: [...new Set(batchResults.flatMap((batch) => batch.commonRisks))].slice(0, 10),
+        rules_to_review: [...new Set(batchResults.flatMap((batch) => batch.rulesToReview))].slice(0, 10),
       },
     });
   } catch (error) {
     console.error("DeepSeek screening failed:", error);
-    return errorResponse(
-      "DEEPSEEK_UNAVAILABLE",
-      "DeepSeek 暂时不可用，可使用备用演示数据",
-      502,
-    );
+    return errorResponse("DEEPSEEK_UNAVAILABLE", "DeepSeek 暂时不可用，可使用备用演示数据", 502);
   }
 }
 
