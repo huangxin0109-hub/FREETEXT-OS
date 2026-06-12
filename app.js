@@ -1,0 +1,564 @@
+const steps = [
+  { route: "home", label: "首页" },
+  { route: "generate", label: "候选生成" },
+  { route: "screen", label: "AI初筛" },
+  { route: "review", label: "人工复核" },
+  { route: "final", label: "最终清单" },
+];
+
+const books = [
+  {
+    id: 1,
+    title: "永结无情游",
+    author: "示例作者",
+    publisher: "理想国｜上海三联书店",
+    date: "2026-05",
+    category: "文学",
+    summary: "讨论人与地方、记忆与行走的文学作品。",
+    rating: "A",
+    reason: "内容有深度，气质安静，适合形成书店文学主题陈列。",
+    risk: "需要确认读者对作者的熟悉程度。",
+    shelf: "文学｜行走与记忆",
+  },
+  {
+    id: 2,
+    title: "要有光",
+    author: "示例作者",
+    publisher: "新经典文化",
+    date: "2026-04",
+    category: "文学非虚构",
+    summary: "从普通人的生活经验出发，记录缓慢但真实的改变。",
+    rating: "A",
+    reason: "叙事清楚，有现实关怀，适合书店读者持续阅读。",
+    risk: "同类非虚构作品较多，需要控制采购数量。",
+    shelf: "文学｜真实生活",
+  },
+  {
+    id: 3,
+    title: "士变",
+    author: "示例作者",
+    publisher: "三联书店",
+    date: "2026-06",
+    category: "思想史",
+    summary: "梳理传统知识人的身份变化与时代选择。",
+    rating: "A",
+    reason: "符合文史哲优先方向，主题清晰，具有长期陈列价值。",
+    risk: "阅读门槛略高，适合重点推荐而非大量进货。",
+    shelf: "历史｜思想史",
+  },
+  {
+    id: 4,
+    title: "先秦人的日常时光",
+    author: "示例作者",
+    publisher: "广西师范大学出版社",
+    date: "2026-05",
+    category: "历史",
+    summary: "通过衣食住行理解先秦社会的日常生活。",
+    rating: "A",
+    reason: "历史知识可靠且容易阅读，适合普通读者进入传统文化。",
+    risk: "需要人工确认内容是否过度通俗化。",
+    shelf: "历史｜古人日常",
+  },
+  {
+    id: 5,
+    title: "绿色的火焰",
+    author: "示例作者",
+    publisher: "译林出版社",
+    date: "2026-03",
+    category: "文学",
+    summary: "围绕自然、孤独和生命经验展开的短篇作品。",
+    rating: "B",
+    reason: "文学气质合适，可补充自然主题和短篇阅读。",
+    risk: "市场认知较低，需要搭配推荐语。",
+    shelf: "文学｜自然书写",
+  },
+  {
+    id: 6,
+    title: "八成可用社会",
+    author: "示例作者",
+    publisher: "中信出版集团",
+    date: "2026-05",
+    category: "社科",
+    summary: "讨论效率、生活选择与社会系统之间的关系。",
+    rating: "B",
+    reason: "议题贴近日常，能作为社科方向的轻入口。",
+    risk: "标题偏流行，需要人工判断内容深度。",
+    shelf: "社科｜社会观察",
+  },
+  {
+    id: 7,
+    title: "Land",
+    author: "Sample Author",
+    publisher: "Overseas Press",
+    date: "2026-04",
+    category: "海外文学",
+    summary: "一部尚未引进的海外文学新作样本。",
+    rating: "C",
+    reason: "主题与文学方向相符，但当前信息不足。",
+    risk: "未确认中文版权、译本与真实采购条件，仅建议观察。",
+    shelf: "观察｜海外文学",
+  },
+  {
+    id: 8,
+    title: "低质流量型成长励志新书样本",
+    author: "示例作者",
+    publisher: "示例出版社",
+    date: "2026-06",
+    category: "成长励志",
+    summary: "以快速成功和情绪口号为主要卖点的样本书。",
+    rating: "D",
+    reason: "内容深度不足，与自由文本书店气质不符。",
+    risk: "可能短期有流量，但不应因此替代人的长期判断。",
+    shelf: "不建议上架",
+  },
+];
+
+const state = {
+  generated: false,
+  filter: "全部",
+  selectedId: 1,
+  reviewIndex: 0,
+  reviews: {},
+  rulesSaved: false,
+};
+
+const app = document.querySelector("#app");
+const stepList = document.querySelector("#step-list");
+
+function currentRoute() {
+  const route = location.hash.replace("#", "") || "home";
+  return steps.some((step) => step.route === route) ? route : "home";
+}
+
+function navigate(route) {
+  location.hash = route;
+}
+
+function renderSteps(route) {
+  const activeIndex = steps.findIndex((step) => step.route === route);
+  stepList.innerHTML = steps
+    .map(
+      (step, index) => `
+        <li>
+          <a href="#${step.route}" class="${index === activeIndex ? "active" : ""} ${
+            index < activeIndex ? "completed" : ""
+          }">
+            ${index + 1}. ${step.label}
+          </a>
+        </li>
+      `,
+    )
+    .join("");
+}
+
+function ratingTag(rating) {
+  return `<span class="rating ${rating}">${rating}</span>`;
+}
+
+function statsMarkup() {
+  const counts = ["A", "B", "C", "D"].map(
+    (rating) => books.filter((book) => book.rating === rating).length,
+  );
+  return `
+    <section class="stats" aria-label="AI初筛统计">
+      ${["A 强烈推荐", "B 可以推荐", "C 谨慎观察", "D 不推荐"]
+        .map(
+          (label, index) => `
+            <div class="stat">
+              <strong>${counts[index]}</strong>
+              <span>${label}</span>
+            </div>
+          `,
+        )
+        .join("")}
+    </section>
+  `;
+}
+
+function pageHome() {
+  return `
+    <section class="page hero">
+      <p class="eyebrow">FREETEXT Bookstore OS · 第一个功能模块</p>
+      <h1>把选书的苦活交给 AI，把最后判断留给人。</h1>
+      <p class="lead">
+        本月选书从一批候选新书开始。AI负责整理、初筛和解释，
+        选书人负责复核、修正并决定最终名单。
+      </p>
+      <div class="notice">
+        这只是本地静态原型。所有书籍和判断均为 mock 数据，不会产生真实采购动作。
+      </div>
+      <div class="actions">
+        <button class="button" data-action="start">开始本月选书</button>
+        <button class="button secondary" data-action="view-final">查看示例最终清单</button>
+      </div>
+    </section>
+  `;
+}
+
+function pageGenerate() {
+  return `
+    <section class="page">
+      <div class="page-heading">
+        <div>
+          <p class="eyebrow">第 2 步 · 候选生成</p>
+          <h2>准备本月候选书</h2>
+          <p>本次使用 8 本本地样本书，模拟新书信息已经整理完成。</p>
+        </div>
+        <span class="tag">无需连接外部数据</span>
+      </div>
+
+      <div class="cards">
+        ${books
+          .map(
+            (book) => `
+              <article class="card">
+                <div class="card-top">
+                  <div>
+                    <h3>${book.title}</h3>
+                    <p>${book.author} · ${book.publisher}</p>
+                  </div>
+                  <span class="tag">${book.category}</span>
+                </div>
+                <p>${book.summary}</p>
+              </article>
+            `,
+          )
+          .join("")}
+      </div>
+
+      <div class="actions">
+        <button class="button" data-action="generate">
+          ${state.generated ? "重新模拟 AI 初筛" : "交给 AI 初筛"}
+        </button>
+        <button class="button muted" data-action="back-home">返回首页</button>
+      </div>
+    </section>
+  `;
+}
+
+function pageScreen() {
+  const visible =
+    state.filter === "全部"
+      ? books
+      : books.filter((book) => book.rating === state.filter);
+  const selected =
+    visible.find((book) => book.id === state.selectedId) || visible[0] || books[0];
+  state.selectedId = selected.id;
+
+  return `
+    <section class="page">
+      <div class="page-heading">
+        <div>
+          <p class="eyebrow">第 3 步 · AI 初筛</p>
+          <h2>AI 已经完成整理和初步判断</h2>
+          <p>先看结果和理由，不在这里做最终决定。</p>
+        </div>
+        <span class="tag">模拟结果</span>
+      </div>
+
+      ${statsMarkup()}
+
+      <div class="filters" aria-label="推荐等级筛选">
+        ${["全部", "A", "B", "C", "D"]
+          .map(
+            (filter) => `
+              <button class="filter ${filter === state.filter ? "active" : ""}" data-filter="${filter}">
+                ${filter}
+              </button>
+            `,
+          )
+          .join("")}
+      </div>
+
+      <div class="split">
+        <section class="panel">
+          <h3>候选书</h3>
+          <div class="book-list">
+            ${visible
+              .map(
+                (book) => `
+                  <button class="book-row ${book.id === selected.id ? "active" : ""}" data-book-id="${book.id}">
+                    <span><strong>${book.title}</strong><br />${book.category}</span>
+                    ${ratingTag(book.rating)}
+                  </button>
+                `,
+              )
+              .join("")}
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="card-top">
+            <div>
+              <p class="eyebrow">AI 判断详情</p>
+              <h2>${selected.title}</h2>
+            </div>
+            ${ratingTag(selected.rating)}
+          </div>
+          <dl class="detail-list">
+            <dt>推荐理由</dt><dd>${selected.reason}</dd>
+            <dt>风险提醒</dt><dd>${selected.risk}</dd>
+            <dt>建议书架</dt><dd>${selected.shelf}</dd>
+            <dt>基本信息</dt><dd>${selected.author} · ${selected.publisher} · ${selected.date}</dd>
+          </dl>
+        </section>
+      </div>
+
+      <div class="actions">
+        <button class="button" data-action="begin-review">开始人工复核</button>
+        <button class="button muted" data-action="back-generate">返回候选生成</button>
+      </div>
+    </section>
+  `;
+}
+
+function pageReview() {
+  if (state.reviewIndex >= books.length) {
+    return `
+      <section class="page hero">
+        <p class="eyebrow">人工复核完成</p>
+        <h1>8 本书都已经由人做出判断。</h1>
+        <p class="lead">AI 的工作到这里是提供参考。最终清单以人工复核结果为准。</p>
+        <div class="actions">
+          <button class="button" data-action="finish-review">生成最终清单</button>
+          <button class="button muted" data-action="review-again">重新复核</button>
+        </div>
+      </section>
+    `;
+  }
+
+  const book = books[state.reviewIndex];
+  const saved = state.reviews[book.id] || {};
+  const progress = Math.round((state.reviewIndex / books.length) * 100);
+
+  return `
+    <section class="page">
+      <div class="review-card">
+        <div class="review-progress">
+          <span>第 ${state.reviewIndex + 1} / ${books.length} 本</span>
+          <span>${progress}% 已完成</span>
+        </div>
+        <div class="progress-track"><div class="progress-bar" style="width: ${progress}%"></div></div>
+
+        <section class="panel" style="margin-top: 20px;">
+          <div class="card-top">
+            <div>
+              <p class="eyebrow">第 4 步 · 人工复核</p>
+              <h2>${book.title}</h2>
+              <p>${book.author} · ${book.publisher} · ${book.category}</p>
+            </div>
+            ${ratingTag(book.rating)}
+          </div>
+          <dl class="detail-list">
+            <dt>AI 推荐理由</dt><dd>${book.reason}</dd>
+            <dt>AI 风险提醒</dt><dd>${book.risk}</dd>
+            <dt>建议书架</dt><dd>${book.shelf}</dd>
+          </dl>
+
+          <div class="field">
+            <label for="final-status">人工最终判断</label>
+            <select id="final-status">
+              <option value="进入候选清单" ${saved.status === "进入候选清单" ? "selected" : ""}>进入候选清单</option>
+              <option value="继续观察" ${saved.status === "继续观察" ? "selected" : ""}>继续观察</option>
+              <option value="不进入清单" ${saved.status === "不进入清单" ? "selected" : ""}>不进入清单</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="review-note">人工备注（可不填）</label>
+            <textarea id="review-note" placeholder="例如：内容合适，但首批只进少量。">${saved.note || ""}</textarea>
+          </div>
+
+          <div class="decision-grid">
+            <button class="button" data-decision="同意">同意 AI 判断</button>
+            <button class="button secondary" data-decision="修改">修改后采用</button>
+            <button class="button danger" data-decision="不接受">不接受 AI 判断</button>
+          </div>
+        </section>
+      </div>
+    </section>
+  `;
+}
+
+function reviewedStatus(book) {
+  if (state.reviews[book.id]) return state.reviews[book.id].status;
+  if (book.rating === "A" || book.rating === "B") return "进入候选清单";
+  if (book.rating === "C") return "继续观察";
+  return "不进入清单";
+}
+
+function finalGroup(status) {
+  return books.filter((book) => reviewedStatus(book) === status);
+}
+
+function bookListMarkup(items) {
+  if (!items.length) return `<p class="empty">暂无书目</p>`;
+  return `
+    <ol class="final-list">
+      ${items.map((book) => `<li><strong>${book.title}</strong> · ${book.category} · AI ${book.rating}</li>`).join("")}
+    </ol>
+  `;
+}
+
+function pageFinal() {
+  const included = finalGroup("进入候选清单");
+  const observing = finalGroup("继续观察");
+  const rejected = finalGroup("不进入清单");
+
+  return `
+    <section class="page">
+      <div class="page-heading">
+        <div>
+          <p class="eyebrow">第 5 步 · 最终清单</p>
+          <h2>本月候选清单已形成</h2>
+          <p>清单来自人工最终判断，AI 只负责提供整理和建议。</p>
+        </div>
+        <span class="tag">${Object.keys(state.reviews).length} / ${books.length} 本已人工复核</span>
+      </div>
+
+      <section class="stats">
+        <div class="stat"><strong>${included.length}</strong><span>进入候选清单</span></div>
+        <div class="stat"><strong>${observing.length}</strong><span>继续观察</span></div>
+        <div class="stat"><strong>${rejected.length}</strong><span>不进入清单</span></div>
+        <div class="stat"><strong>${Object.keys(state.reviews).length}</strong><span>人工复核数量</span></div>
+      </section>
+
+      <div class="final-columns">
+        <section class="panel">
+          <h3>进入候选清单</h3>
+          ${bookListMarkup(included)}
+        </section>
+        <section class="panel">
+          <h3>继续观察</h3>
+          ${bookListMarkup(observing)}
+        </section>
+        <section class="panel">
+          <h3>不进入清单</h3>
+          ${bookListMarkup(rejected)}
+        </section>
+        <section class="panel">
+          <h3>本轮可沉淀的规则</h3>
+          <ul class="rule-list">
+            <li>文学样本应保持约 30%–40%，避免清单失去书店气质。</li>
+            <li>海外未引进文学先标记为观察，不直接进入候选。</li>
+            <li>主题正确但零售吸引力较弱的书，进入 C 类观察。</li>
+          </ul>
+          <div class="actions">
+            <button class="button secondary" data-action="save-rules">
+              ${state.rulesSaved ? "规则已确认" : "确认沉淀规则"}
+            </button>
+          </div>
+        </section>
+      </div>
+
+      <div class="actions">
+        <button class="button" data-action="export">导出清单（模拟）</button>
+        <button class="button muted" data-action="restart">开始新的选书轮次</button>
+      </div>
+    </section>
+  `;
+}
+
+function render() {
+  const route = currentRoute();
+  renderSteps(route);
+  const pages = {
+    home: pageHome,
+    generate: pageGenerate,
+    screen: pageScreen,
+    review: pageReview,
+    final: pageFinal,
+  };
+  app.innerHTML = pages[route]();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function showToast(message) {
+  document.querySelector(".toast")?.remove();
+  const toast = document.createElement("div");
+  toast.className = "toast";
+  toast.textContent = message;
+  document.body.append(toast);
+  setTimeout(() => toast.remove(), 2200);
+}
+
+function saveReview(decision) {
+  const book = books[state.reviewIndex];
+  const status = document.querySelector("#final-status").value;
+  const note = document.querySelector("#review-note").value.trim();
+  state.reviews[book.id] = { decision, status, note };
+  state.reviewIndex += 1;
+  render();
+}
+
+function exportMockList() {
+  const lines = [
+    "AI选书官 · 最终候选清单（静态原型）",
+    "",
+    ...finalGroup("进入候选清单").map(
+      (book, index) => `${index + 1}. ${book.title}｜${book.category}｜AI ${book.rating}`,
+    ),
+    "",
+    "说明：本清单由本地 mock 数据生成，不代表真实采购决定。",
+  ];
+  const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = "AI_BOOK_SELECTOR_MOCK_FINAL_LIST.txt";
+  link.click();
+  URL.revokeObjectURL(link.href);
+  showToast("模拟清单已导出");
+}
+
+document.addEventListener("click", (event) => {
+  const action = event.target.closest("[data-action]")?.dataset.action;
+  const filter = event.target.closest("[data-filter]")?.dataset.filter;
+  const bookId = event.target.closest("[data-book-id]")?.dataset.bookId;
+  const decision = event.target.closest("[data-decision]")?.dataset.decision;
+
+  if (filter) {
+    state.filter = filter;
+    render();
+  }
+  if (bookId) {
+    state.selectedId = Number(bookId);
+    render();
+  }
+  if (decision) saveReview(decision);
+
+  if (action === "start") navigate("generate");
+  if (action === "view-final") navigate("final");
+  if (action === "back-home") navigate("home");
+  if (action === "back-generate") navigate("generate");
+  if (action === "generate") {
+    state.generated = true;
+    showToast("AI 正在模拟整理 8 本候选书…");
+    setTimeout(() => navigate("screen"), 650);
+  }
+  if (action === "begin-review") {
+    state.reviewIndex = 0;
+    navigate("review");
+  }
+  if (action === "finish-review") navigate("final");
+  if (action === "review-again") {
+    state.reviewIndex = 0;
+    render();
+  }
+  if (action === "save-rules") {
+    state.rulesSaved = true;
+    showToast("本轮规则已确认");
+    render();
+  }
+  if (action === "export") exportMockList();
+  if (action === "restart") {
+    state.generated = false;
+    state.filter = "全部";
+    state.reviewIndex = 0;
+    state.reviews = {};
+    state.rulesSaved = false;
+    navigate("home");
+  }
+});
+
+window.addEventListener("hashchange", render);
+render();

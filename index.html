@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="AI选书官最小静态可点击原型：AI做苦活，人做判断。"
+    />
+    <title>AI选书官 · 静态原型</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#home" aria-label="返回首页">
+        <span class="brand-mark">F</span>
+        <span>
+          <strong>AI选书官</strong>
+          <small>AI做苦活，人做判断</small>
+        </span>
+      </a>
+      <span class="prototype-badge">静态原型 · 本地 mock 数据</span>
+    </header>
+
+    <nav class="step-nav" aria-label="选书流程">
+      <ol id="step-list"></ol>
+    </nav>
+
+    <main id="app" class="app-shell" aria-live="polite"></main>
+
+    <footer class="site-footer">
+      本原型不连接真实 AI、库存、采购或登录系统。
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>
