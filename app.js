@@ -124,12 +124,13 @@ const state = {
   enrichmentStatus: "idle",
   enrichmentMessage: "",
   searchQuery: "",
-  searchYearFrom: "2015",
-  searchYearTo: "2026",
+  searchYearFrom: "2015-01",
+  searchYearTo: "2026-12",
   searchLimit: 20,
   searchStatus: "idle",
   searchResults: [],
   searchSelected: {},
+  searchSourceWarnings: [],
   attachmentStatus: "idle",
   attachmentName: "",
   attachmentPreview: [],
@@ -324,6 +325,28 @@ function normalizeOpenLibrary(doc, source = "Open Library") {
   };
 }
 
+function normalizeDoubanBook(item, source = "豆瓣官网") {
+  const abstract = String(item?.abstract || item?.abstract_2 || "");
+  const isbn = cleanIsbn(abstract);
+  const date = abstract.match(/\b(?:19|20)\d{2}(?:-\d{1,2})?(?:-\d{1,2})?\b/)?.[0] || "";
+  return {
+    title: item?.title || "",
+    isbn,
+    author: item?.author_name || "",
+    translator: "",
+    publisher: "",
+    date,
+    year: date.match(/\d{4}/)?.[0] || "",
+    category: "待补充",
+    keywords: [],
+    pages: "",
+    binding: "",
+    price: "",
+    summary: abstract,
+    dataSource: [source],
+  };
+}
+
 function useful(value) {
   return value !== undefined && value !== null && value !== "" && value !== "待补充" && value !== "待人工确认";
 }
@@ -354,9 +377,13 @@ function mergeBookData(base, additions) {
   const required = ["isbn", "author", "translator", "publisher", "date", "year", "category", "keywords", "pages", "binding", "price", "summary"];
   merged.missingFields = required.filter((field) => !useful(merged[field]) || (Array.isArray(merged[field]) && !merged[field].length));
   merged.confidence = merged.dataSource.length >= 2 ? "高" : merged.dataSource.length === 1 ? "中" : "低";
-  merged.enrichmentRisk = merged.missingFields.length
-    ? `仍缺少：${merged.missingFields.join("、")}，需要人工确认。`
-    : "公开数据字段较完整，仍需人工确认具体版本。";
+  const dateRisk = !useful(merged.date) && !useful(merged.year) ? "出版时间缺失，需人工复核。" : "";
+  merged.enrichmentRisk = [
+    merged.missingFields.length
+      ? `仍缺少：${merged.missingFields.join("、")}，需要人工确认。`
+      : "公开数据字段较完整，仍需人工确认具体版本。",
+    dateRisk,
+  ].filter(Boolean).join(" ");
   return merged;
 }
 
@@ -380,12 +407,21 @@ async function lookupOpenLibrary(query, limit = 5) {
   return (data.docs || []).map((doc) => normalizeOpenLibrary(doc));
 }
 
+async function lookupDouban(query, limit = 5) {
+  const data = await fetchJson(
+    `/api/search-douban?q=${encodeURIComponent(query)}&limit=${Math.min(limit, 20)}`,
+  );
+  if (data.warning && !(data.items || []).length) throw new Error(`豆瓣官网：${data.warning}`);
+  return (data.items || []).map((item) => normalizeDoubanBook(item));
+}
+
 async function enrichBook(book) {
   const additions = [];
   if (book.isbn) {
     const exact = await Promise.allSettled([
       lookupGoogle(`isbn:${book.isbn}`, 3),
       lookupOpenLibrary(`isbn=${encodeURIComponent(book.isbn)}`, 3),
+      lookupDouban(book.isbn, 3),
     ]);
     exact.forEach((result) => {
       if (result.status === "fulfilled" && result.value[0]) additions.push(result.value[0]);
@@ -395,6 +431,7 @@ async function enrichBook(book) {
     const byTitle = await Promise.allSettled([
       lookupGoogle(`intitle:${book.title}`, 3),
       lookupOpenLibrary(`title=${encodeURIComponent(book.title)}`, 3),
+      lookupDouban(book.title, 3),
     ]);
     byTitle.forEach((result) => {
       if (result.status === "fulfilled" && result.value[0]) additions.push(result.value[0]);
@@ -434,18 +471,22 @@ async function searchOnlineBooks() {
     render();
     return;
   }
-  Object.assign(state, { searchQuery: query, searchYearFrom: yearFrom, searchYearTo: yearTo, searchLimit: limit, searchStatus: "loading", inputErrors: [] });
+  Object.assign(state, { searchQuery: query, searchYearFrom: yearFrom, searchYearTo: yearTo, searchLimit: limit, searchStatus: "loading", inputErrors: [], searchSourceWarnings: [] });
   render({ scrollToTop: false });
   try {
+    const sourceWarnings = new Set();
     const searchSources = async (term) => {
-      const [google, openLibrary] = await Promise.allSettled([
-        lookupGoogle(term, Math.max(limit, 40)),
-        lookupOpenLibrary(`q=${encodeURIComponent(term)}`, 100),
-      ]);
-      return [
-        ...(google.status === "fulfilled" ? google.value : []),
-        ...(openLibrary.status === "fulfilled" ? openLibrary.value : []),
+      const sources = [
+        ["Google Books", lookupGoogle(term, Math.max(limit, 40))],
+        ["Open Library", lookupOpenLibrary(`q=${encodeURIComponent(term)}`, 100)],
+        ["豆瓣官网", lookupDouban(term, limit)],
       ];
+      const results = await Promise.allSettled(sources.map(([, request]) => request));
+      return results.flatMap((result, index) => {
+        if (result.status === "fulfilled") return result.value;
+        sourceWarnings.add(`${sources[index][0]}暂时不可用`);
+        return [];
+      });
     };
     let combined = await searchSources(query);
     const topicTranslations = {
@@ -465,13 +506,22 @@ async function searchOnlineBooks() {
     }
     const byKey = new Map();
     combined.forEach((book) => {
-      const year = Number(book.year);
-      if ((yearFrom || yearTo) && (!year || year < Number(yearFrom) || year > Number(yearTo))) return;
+      const publishDate = publicationDateInfo(book.date || book.year);
+      const fromYear = yearFrom.slice(0, 4);
+      const toYear = yearTo.slice(0, 4);
+      if (publishDate.month && ((yearFrom && publishDate.month < yearFrom) || (yearTo && publishDate.month > yearTo))) return;
+      if (!publishDate.month && publishDate.year && ((fromYear && publishDate.year < fromYear) || (toYear && publishDate.year > toYear))) return;
+      if (!publishDate.year) {
+        book.enrichmentRisk = [book.enrichmentRisk, "出版时间缺失，需人工复核。"].filter(Boolean).join(" ");
+      } else if (!publishDate.month) {
+        book.enrichmentRisk = [book.enrichmentRisk, "出版月份缺失，需人工复核。"].filter(Boolean).join(" ");
+      }
       const key = book.isbn || `${book.title}-${book.author}`;
       byKey.set(key, mergeBookData(byKey.get(key) || emptyBook(`search-${byKey.size + 1}`, book.title, book.isbn), [book]));
     });
     state.searchResults = [...byKey.values()].slice(0, limit).map((book, index) => ({ ...book, id: `search-${index + 1}` }));
     state.searchSelected = Object.fromEntries(state.searchResults.map((book) => [book.id, true]));
+    state.searchSourceWarnings = [...sourceWarnings];
     state.searchStatus = "success";
     if (!state.searchResults.length) {
       state.inputErrors = ["公开图书 API 暂未返回符合年份范围的结果，请放宽年份或更换关键词。"];
@@ -482,6 +532,17 @@ async function searchOnlineBooks() {
     state.inputErrors = ["网上查询暂时不可用，请稍后重试或使用粘贴/附件导入。"];
     render({ scrollToTop: false });
   }
+}
+
+function publicationDateInfo(value) {
+  const match = String(value || "").match(/\b(\d{4})(?:[-/.年](\d{1,2}))?/);
+  if (!match) return { year: "", month: "" };
+  return {
+    year: match[1],
+    month: match[2]
+      ? `${match[1]}-${String(Math.min(12, Math.max(1, Number(match[2])))).padStart(2, "0")}`
+      : "",
+  };
 }
 
 function importSelectedSearchBooks() {
@@ -524,19 +585,41 @@ function rowsToBooks(rows) {
     .filter((row) => Array.isArray(row) && row.some((cell) => String(cell || "").trim()))
     .map((row) => row.map((cell) => String(cell ?? "").trim()));
   if (!normalizedRows.length) return [];
-  const headerText = normalizedRows[0].join("|");
-  if (/书名|title|isbn/i.test(headerText)) normalizedRows.shift();
+  const aliases = {
+    title: ["书名", "title"],
+    author: ["作者", "author"],
+    isbn: ["isbn"],
+    publisher: ["出版社", "publisher"],
+    date: ["出版时间", "出版日期", "出版年月", "date"],
+    category: ["分类", "类别", "category"],
+    summary: ["简介", "内容简介", "summary", "description"],
+    price: ["价格", "定价", "price"],
+  };
+  const normalizedHeader = normalizedRows[0].map((cell) => cell.toLowerCase().replace(/\s+/g, ""));
+  const headerMap = {};
+  Object.entries(aliases).forEach(([field, names]) => {
+    const index = normalizedHeader.findIndex((cell) => names.some((name) => cell === name.toLowerCase()));
+    if (index >= 0) headerMap[field] = index;
+  });
+  const hasHeader = headerMap.title !== undefined && Object.keys(headerMap).length >= 2;
+  if (hasHeader) normalizedRows.shift();
+  const columnIndex = hasHeader
+    ? headerMap
+    : { title: 0, author: 1, isbn: 2, publisher: 3, date: 4, category: 5, summary: 6, price: 7 };
+  const cell = (row, field) => columnIndex[field] === undefined ? "" : row[columnIndex[field]] || "";
   return normalizedRows.slice(0, 40).map((row, index) => {
-    const isbn = cleanIsbn(row.join(" "));
-    const title = cleanTitle(row[0], isbn) || cleanTitle(row.join(" "), isbn);
+    const isbn = cleanIsbn(cell(row, "isbn")) || cleanIsbn(row.join(" "));
+    const title = cleanTitle(cell(row, "title"), isbn);
+    const date = cell(row, "date");
     return {
       ...emptyBook(`attachment-${index + 1}`, title, isbn),
-      author: row[1] || "待补充",
-      publisher: row[2] || "待补充",
-      date: row[3] || "待补充",
-      category: row[4] || "待补充",
-      summary: row[5] || "",
-      price: row[6] || null,
+      author: cell(row, "author") || "待补充",
+      publisher: cell(row, "publisher") || "待补充",
+      date: date || "待补充",
+      year: String(date).match(/\d{4}/)?.[0] || "待补充",
+      category: cell(row, "category") || "待补充",
+      summary: cell(row, "summary"),
+      price: cell(row, "price") || null,
     };
   }).filter((book) => book.title);
 }
@@ -550,7 +633,7 @@ async function parseAttachment(file) {
   if (extension === "xlsx" || extension === "xls") {
     const XLSX = await loadBrowserScript("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js", "XLSX");
     const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
-    return rowsToBooks(XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { header: 1, defval: "" }));
+    return rowsToBooks(XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { header: 1, defval: "", raw: false }));
   }
   if (extension === "docx") {
     const mammoth = await loadBrowserScript("https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js", "mammoth");
@@ -691,18 +774,20 @@ function pageGenerate() {
           <h3>网上书单查询</h3>
           <div class="form-grid">
             <div class="field"><label for="search-query">搜索关键词</label><input id="search-query" value="${escapeHtml(state.searchQuery)}" placeholder="例如：艺术入门" /></div>
-            <div class="field"><label for="year-from">出版年份从</label><input id="year-from" type="number" value="${escapeHtml(state.searchYearFrom)}" /></div>
-            <div class="field"><label for="year-to">出版年份到</label><input id="year-to" type="number" value="${escapeHtml(state.searchYearTo)}" /></div>
+            <div class="field"><label for="year-from">出版年月从</label><input id="year-from" type="month" value="${escapeHtml(state.searchYearFrom)}" /></div>
+            <div class="field"><label for="year-to">出版年月到</label><input id="year-to" type="month" value="${escapeHtml(state.searchYearTo)}" /></div>
             <div class="field"><label for="search-limit">最大数量</label><input id="search-limit" type="number" min="1" max="40" value="${state.searchLimit}" /></div>
           </div>
-          <div class="actions"><button class="button" data-action="search-online">${state.searchStatus === "loading" ? "正在查询…" : "查询公开图书 API"}</button></div>
+          <p>查询来源：Google Books、Open Library、豆瓣官网。缺少出版时间的书会保留并交给人工复核。</p>
+          ${state.searchSourceWarnings.length ? `<p>来源提示：${state.searchSourceWarnings.map(escapeHtml).join("；")}，其他来源结果仍可继续使用。</p>` : ""}
+          <div class="actions"><button class="button" data-action="search-online">${state.searchStatus === "loading" ? "正在查询…" : "查询网上书单"}</button></div>
         </section>
         ${state.searchResults.length ? `
           <section class="panel result-panel">
             <h3>查询结果：${state.searchResults.length} 本</h3>
             <div class="selection-list">${state.searchResults.map((book) => `
               <label class="selection-row"><input type="checkbox" data-search-id="${book.id}" ${state.searchSelected[book.id] ? "checked" : ""} />
-                <span><strong>${escapeHtml(book.title)}</strong><br />${escapeHtml(book.author)} · ${escapeHtml(book.publisher)} · ${escapeHtml(book.year)} · ${escapeHtml(book.isbn)}</span>
+                <span><strong>${escapeHtml(book.title)}</strong><br />${escapeHtml(book.author)} · ${escapeHtml(book.publisher)} · ${escapeHtml(book.date || "出版时间缺失，需人工复核")} · ${escapeHtml(book.isbn)}</span>
               </label>`).join("")}</div>
             <div class="actions"><button class="button" data-action="import-search">导入已勾选书目</button></div>
           </section>` : ""}
