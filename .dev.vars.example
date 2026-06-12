@@ -1,0 +1,3 @@
+# 本地测试时复制为 .dev.vars，并填入真实密钥。
+# 不要把包含真实密钥的 .dev.vars 提交到 GitHub。
+DEEPSEEK_API_KEY=
