@@ -9,8 +9,9 @@ export const SELECTION_RULES = `
 3. 明显大众畅销但不符合 FREETEXT 气质的书慎选。
 4. 低质量拼凑、内容空泛、只靠流量或情绪口号的书慎选。
 5. 选书数量要克制，优先保留有内容深度、长期陈列价值和明确读者价值的书。
-6. 信息不足时降低推荐等级，并明确列出需要人工确认的信息。
-7. 你只能提供建议。每一本书都必须由人复核，不能自动决定采购。
+6. 信息不足时，先根据你可靠的已有知识尝试补全，再进行初筛。
+7. 不能确认的信息必须标记为“待人工确认”，不得编造；信息不足时降低推荐等级。
+8. 你只能提供建议。每一本书都必须由人复核，不能自动决定采购。
 
 推荐等级：
 - A：强烈推荐。高度符合书店气质，内容价值清楚，值得优先人工复核。
@@ -32,20 +33,37 @@ ${JSON.stringify(input.books, null, 2)}
 请只返回一个 JSON 对象，不要使用 Markdown，不要添加 JSON 之外的文字。
 返回格式必须是：
 {
-  "results": [{
-    "id": "与输入完全一致的书籍 id",
-    "rating": "A、B、C 或 D",
-    "candidate_decision": "建议进入、继续观察或不建议进入",
-    "reason": "简洁、具体、可供人工判断的推荐理由",
-    "risks": ["风险提醒"],
-    "shelf_theme": "适合书架或主题",
-    "needs_human_review": true,
-    "human_review_questions": ["需要人工确认的问题"],
-    "missing_information": ["缺少的信息"]
-  }],
-  "summary": { "common_risks": ["本轮常见风险"], "rules_to_review": ["建议人工复核或补充的规则"] }
+  "results": [
+    {
+      "id": "与输入完全一致的书籍 id",
+      "rating": "A、B、C 或 D",
+      "candidate_decision": "建议进入、继续观察或不建议进入",
+      "reason": "简洁、具体、可供人工判断的推荐理由",
+      "risks": ["风险提醒"],
+      "shelf_theme": "适合书架或主题",
+      "needs_human_review": true,
+      "human_review_questions": ["需要人工确认的问题"],
+      "missing_information": ["补全后仍缺少的信息"],
+      "enriched_fields": {
+        "author": "补全值或待人工确认",
+        "publisher": "补全值或待人工确认",
+        "publish_date": "补全值或待人工确认",
+        "category": "补全值或待人工确认",
+        "description": "补全值或待人工确认",
+        "price": "补全值或待人工确认"
+      },
+      "enrichment_confidence": "高、中或低",
+      "enrichment_notes": ["补全依据与需要核实的内容"]
+    }
+  ],
+  "summary": {
+    "common_risks": ["本轮常见风险"],
+    "rules_to_review": ["建议人工复核或补充的规则"]
+  }
 }
 
 必须为每一本输入书籍返回一条结果，不可遗漏，不可新增书籍。
+输入中为“待补充”、空字符串或 null 的字段都视为缺失字段。先尝试补全，再基于补全后的信息初筛。
+DeepSeek 当前不能联网搜索，只能使用可靠的已有知识；不确定时必须填写“待人工确认”。
 `;
 }
