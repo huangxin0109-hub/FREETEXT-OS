@@ -194,14 +194,19 @@ function emptyBook(id, title = "", isbn = "") {
     binding: "待补充",
     price: null,
     summary: "",
+    catalog: "",
+    reviewExcerpt: "",
     publishDate: "",
     publishYear: "",
     publishMonth: "",
     coverUrl: "",
     source: "",
     sourceStatus: "pending",
+    sourceConfidence: "low",
+    infoCompleteness: "poor",
     needsReview: true,
     reviewReason: "待补充信息需人工确认",
+    candidateReason: "",
     dataSource: [],
     confidence: "低",
     missingFields: [],
@@ -294,7 +299,25 @@ function normalizeSearchResult(item = {}, source = "公开图书来源") {
     .filter(Boolean);
   if (!dateInfo.year) reasons.push("出版时间缺失，需人工复核");
   else if (!dateInfo.month) reasons.push("出版月份缺失，需人工复核");
-  const needsReview = Boolean(item.needsReview || reasons.length);
+  const sourceConfidence = item.sourceConfidence || (
+    ["当当图书搜索", "京东图书搜索", "Google Books"].includes(source) ? "medium" : "low"
+  );
+  const summary = item.summary || "";
+  const catalog = item.catalog || "";
+  const reviewExcerpt = item.reviewExcerpt || "";
+  const coreFields = [item.title, item.author, item.publisher, publishDate, summary];
+  const coreCount = coreFields.filter(useful).length;
+  const infoCompleteness = item.infoCompleteness || (
+    coreCount === coreFields.length && (catalog || reviewExcerpt)
+      ? "complete"
+      : coreCount >= 4
+        ? "partial"
+        : "poor"
+  );
+  if (!summary) reasons.push("图书简介缺失");
+  if (!catalog) reasons.push("目录缺失");
+  if (!reviewExcerpt) reasons.push("书评或来源摘要缺失");
+  const needsReview = Boolean(item.needsReview || reasons.length || infoCompleteness !== "complete");
   return {
     ...item,
     title: item.title || "",
@@ -308,8 +331,11 @@ function normalizeSearchResult(item = {}, source = "公开图书来源") {
     coverUrl: item.coverUrl || "",
     source,
     sourceStatus: item.sourceStatus || "success",
+    sourceConfidence,
+    infoCompleteness,
     needsReview,
     reviewReason: [...new Set(reasons)].join("；"),
+    candidateReason: item.candidateReason || "",
     date: publishDate,
     year: item.publishYear || dateInfo.year,
     dataSource: [...new Set([...(item.dataSource || []), source])],
@@ -318,7 +344,9 @@ function normalizeSearchResult(item = {}, source = "公开图书来源") {
     keywords: item.keywords || [],
     binding: item.binding || "",
     price: item.price || "",
-    summary: item.summary || "",
+    summary,
+    catalog,
+    reviewExcerpt,
   };
 }
 
@@ -345,6 +373,8 @@ function normalizeGoogleBook(item, source = "Google Books") {
       ? `${sale.listPrice.amount} ${sale.listPrice.currencyCode}`
       : "",
     summary: info.description || "",
+    catalog: "",
+    reviewExcerpt: "",
     coverUrl: info.imageLinks?.thumbnail || "",
   }, source);
 }
@@ -364,6 +394,8 @@ function normalizeOpenLibrary(doc, source = "Open Library") {
     binding: "",
     price: "",
     summary: "",
+    catalog: "",
+    reviewExcerpt: "",
     coverUrl: doc?.cover_i ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg` : "",
   }, source);
 }
@@ -393,12 +425,17 @@ function mergeBookData(base, additions) {
       "binding",
       "price",
       "summary",
+      "catalog",
+      "reviewExcerpt",
       "publishDate",
       "publishYear",
       "publishMonth",
       "coverUrl",
       "source",
       "sourceStatus",
+      "sourceConfidence",
+      "infoCompleteness",
+      "candidateReason",
     ].forEach((field) => {
       if (!useful(merged[field]) && useful(addition[field])) merged[field] = addition[field];
     });
@@ -414,7 +451,7 @@ function mergeBookData(base, additions) {
         .filter(Boolean),
     )].join("；");
   });
-  const required = ["isbn", "author", "translator", "publisher", "date", "year", "category", "keywords", "pages", "binding", "price", "summary"];
+  const required = ["isbn", "author", "translator", "publisher", "date", "year", "category", "keywords", "pages", "binding", "price", "summary", "catalog", "reviewExcerpt"];
   merged.missingFields = required.filter((field) => !useful(merged[field]) || (Array.isArray(merged[field]) && !merged[field].length));
   merged.confidence = merged.dataSource.length >= 2 ? "高" : merged.dataSource.length === 1 ? "中" : "低";
   const dateRisk = !useful(merged.date) && !useful(merged.year) ? "出版时间缺失，需人工复核。" : "";
@@ -437,7 +474,51 @@ function mergeBookData(base, additions) {
     merged.needsReview = true;
     merged.reviewReason = [merged.reviewReason, "出版月份缺失，需人工复核"].filter(Boolean).join("；");
   }
+  const contentCount = [merged.title, merged.author, merged.publisher, merged.publishDate, merged.summary]
+    .filter(useful).length;
+  merged.infoCompleteness = contentCount === 5 && (useful(merged.catalog) || useful(merged.reviewExcerpt))
+    ? "complete"
+    : contentCount >= 4
+      ? "partial"
+      : "poor";
+  const mediumConfidenceSources = ["当当图书搜索", "京东图书搜索", "Google Books", "Open Library"];
+  merged.sourceConfidence = merged.dataSource.length >= 2
+    ? "high"
+    : merged.dataSource.some((source) => mediumConfidenceSources.includes(source))
+      ? "medium"
+      : "low";
+  if (merged.infoCompleteness !== "complete") merged.needsReview = true;
   return merged;
+}
+
+const categoryKeywords = ["文学", "艺术", "设计", "建筑", "社科", "历史", "哲学", "商业", "亲子", "生活方式", "城市文化", "独立出版"];
+const sceneKeywords = ["企业书单", "文化空间", "艺术书展", "亲子阅读", "女性成长", "商业认知", "城市更新"];
+
+function candidateSearchIntent(query) {
+  const isbn = cleanIsbn(query);
+  const years = [...String(query).matchAll(/\b(?:19|20)\d{2}(?:-\d{1,2})?\b/g)].map((match) => match[0]);
+  const categories = categoryKeywords.filter((keyword) => query.includes(keyword));
+  const scenes = sceneKeywords.filter((keyword) => query.includes(keyword));
+  const searchTerm = String(query)
+    .replace(/\b(?:19|20)\d{2}(?:-\d{1,2})?\b/g, "")
+    .replace(/新书|至/g, "")
+    .trim() || query;
+  return { query, searchTerm, isbn, years, categories, scenes };
+}
+
+function candidateReasonFor(book, intent) {
+  const haystack = `${book.title} ${book.author} ${book.category} ${(book.keywords || []).join(" ")}`;
+  if (intent.isbn) return "ISBN 匹配候选书";
+  const category = intent.categories.find((keyword) => haystack.includes(keyword));
+  if (category) return `分类或关键词匹配：${category}`;
+  if (intent.categories.length) return `分类关键词搜索：${intent.categories.join("、")}`;
+  const scene = intent.scenes.find((keyword) => haystack.includes(keyword));
+  if (scene) return `场景关键词匹配：${scene}`;
+  if (intent.scenes.length) return `场景关键词搜索：${intent.scenes.join("、")}`;
+  if (intent.years.length) return `关键词与出版年份匹配：${intent.years.join("、")}`;
+  if (book.title.includes(intent.searchTerm)) return "关键词匹配书名";
+  if (book.author.includes(intent.searchTerm)) return "关键词匹配作者";
+  return "来源返回的相关候选书";
 }
 
 async function fetchJson(url) {
@@ -534,13 +615,20 @@ async function enrichBooks(books) {
 
 async function searchOnlineBooks() {
   const query = document.querySelector("#search-query")?.value.trim() || state.searchQuery;
-  const yearFrom = document.querySelector("#year-from")?.value || state.searchYearFrom;
-  const yearTo = document.querySelector("#year-to")?.value || state.searchYearTo;
+  let yearFrom = document.querySelector("#year-from")?.value || state.searchYearFrom;
+  let yearTo = document.querySelector("#year-to")?.value || state.searchYearTo;
   const limit = Math.min(40, Math.max(1, Number(document.querySelector("#search-limit")?.value || state.searchLimit)));
   if (!query) {
     state.inputErrors = ["请输入网上书单查询关键词。"];
     render();
     return;
+  }
+  const intent = candidateSearchIntent(query);
+  if (intent.years.length) {
+    const firstYear = intent.years[0];
+    const lastYear = intent.years.at(-1);
+    yearFrom = firstYear.includes("-") ? firstYear : `${firstYear}-01`;
+    yearTo = lastYear.includes("-") ? lastYear : `${lastYear}-12`;
   }
   Object.assign(state, { searchQuery: query, searchYearFrom: yearFrom, searchYearTo: yearTo, searchLimit: limit, searchStatus: "loading", inputErrors: [], searchSourceWarnings: [] });
   render({ scrollToTop: false });
@@ -548,9 +636,9 @@ async function searchOnlineBooks() {
     const sourceWarnings = new Set();
     const searchSources = async (term) => {
       const sources = [
-        ["当当图书搜索", lookupDangdang(term, limit)],
-        ["京东图书搜索", lookupJdBook(term, limit)],
-        ["豆瓣图书搜索代理", lookupDouban(term, limit)],
+        ["当当图书搜索", lookupDangdang(term, Math.max(limit, 20))],
+        ["京东图书搜索", lookupJdBook(term, Math.max(limit, 20))],
+        ["豆瓣图书搜索代理", lookupDouban(term, Math.max(limit, 20))],
         ["Google Books", lookupGoogle(term, Math.max(limit, 40))],
         ["Open Library", lookupOpenLibrary(`q=${encodeURIComponent(term)}`, 100)],
       ];
@@ -570,15 +658,15 @@ async function searchOnlineBooks() {
       哲学: "philosophy introduction",
       社科: "social science introduction",
     };
-    const broaderQuery = query.replace(/入门|导论|指南|教程/g, "").trim();
+    const broaderQuery = intent.searchTerm.replace(/入门|导论|指南|教程|书单/g, "").trim();
     const translatedQuery = Object.entries(topicTranslations).find(([topic]) => query.includes(topic))?.[1];
-    for (const fallbackQuery of [broaderQuery.length >= 3 ? broaderQuery : "", translatedQuery]) {
+    for (const fallbackQuery of [intent.searchTerm, broaderQuery.length >= 3 ? broaderQuery : "", translatedQuery]) {
       if (!combined.length && fallbackQuery && fallbackQuery !== query) {
         combined = await searchSources(fallbackQuery);
       }
     }
     const byKey = new Map();
-    combined.forEach((book) => {
+    combined.filter((book) => useful(book.title)).forEach((book) => {
       const publishDate = publicationDateInfo(book.publishDate || book.date || book.publishYear || book.year);
       const fromYear = yearFrom.slice(0, 4);
       const toYear = yearTo.slice(0, 4);
@@ -593,11 +681,12 @@ async function searchOnlineBooks() {
         book.needsReview = true;
         book.reviewReason = [book.reviewReason, "出版月份缺失，需人工复核"].filter(Boolean).join("；");
       }
+      book.candidateReason = candidateReasonFor(book, intent);
       const key = book.isbn || `${String(book.title).trim().toLowerCase()}-${String(book.author).trim().toLowerCase()}`;
       byKey.set(key, mergeBookData(byKey.get(key) || emptyBook(`search-${byKey.size + 1}`, book.title, book.isbn), [book]));
     });
     state.searchResults = [...byKey.values()].slice(0, limit).map((book, index) => ({ ...book, id: `search-${index + 1}` }));
-    state.searchSelected = Object.fromEntries(state.searchResults.map((book) => [book.id, true]));
+    state.searchSelected = Object.fromEntries(state.searchResults.map((book) => [book.id, false]));
     state.searchSourceWarnings = [...sourceWarnings];
     state.searchStatus = "success";
     if (!state.searchResults.length) {
@@ -606,7 +695,7 @@ async function searchOnlineBooks() {
     render({ scrollToTop: false });
   } catch {
     state.searchStatus = "error";
-    state.inputErrors = ["网上查询暂时不可用，请稍后重试或使用粘贴/附件导入。"];
+    state.inputErrors = ["候选书搜索暂时不可用，请稍后重试，或继续使用粘贴书单和附件导入。"];
     render({ scrollToTop: false });
   }
 }
@@ -625,7 +714,7 @@ function publicationDateInfo(value) {
 function importSelectedSearchBooks() {
   const selected = state.searchResults.filter((book) => state.searchSelected[book.id]);
   if (!selected.length) {
-    state.inputErrors = ["请至少勾选 1 本网上查询结果。"];
+    state.inputErrors = ["请先人工勾选至少 1 本候选书，再确认导入。"];
     render({ scrollToTop: false });
     return;
   }
@@ -633,7 +722,7 @@ function importSelectedSearchBooks() {
   state.originalBooks = structuredClone(state.books);
   state.inputMode = "search";
   state.inputErrors = [];
-  state.enrichmentMessage = `已从网上查询结果导入 ${state.books.length} 本书，可继续补全并初筛。`;
+  state.enrichmentMessage = `已人工确认并导入 ${state.books.length} 本候选书，可继续补全信息并交给 DeepSeek 初筛。`;
   render({ scrollToTop: false });
 }
 
@@ -832,7 +921,7 @@ function pageGenerate() {
 
       <div class="filters" aria-label="书单导入方式">
         <button class="filter ${state.inputMode === "real" ? "active" : ""}" data-input-mode="real">粘贴书单</button>
-        <button class="filter ${state.inputMode === "search" ? "active" : ""}" data-input-mode="search">网上查询</button>
+        <button class="filter ${state.inputMode === "search" ? "active" : ""}" data-input-mode="search">找候选书</button>
         <button class="filter ${state.inputMode === "attachment" ? "active" : ""}" data-input-mode="attachment">附件导入</button>
         <button class="filter ${state.inputMode === "demo" ? "active" : ""}" data-input-mode="demo">8 本演示书单</button>
       </div>
@@ -848,25 +937,29 @@ function pageGenerate() {
 
       ${state.inputMode === "search" ? `
         <section class="panel">
-          <h3>网上书单查询</h3>
+          <h3>候选书池搜索</h3>
           <div class="form-grid">
-            <div class="field"><label for="search-query">搜索关键词</label><input id="search-query" value="${escapeHtml(state.searchQuery)}" placeholder="例如：艺术入门" /></div>
+            <div class="field"><label for="search-query">书名、作者、ISBN、分类、场景或年份</label><input id="search-query" value="${escapeHtml(state.searchQuery)}" placeholder="例如：中国美学、企业书单、2025 新书 艺术" /></div>
             <div class="field"><label for="year-from">出版年月从</label><input id="year-from" type="month" value="${escapeHtml(state.searchYearFrom)}" /></div>
             <div class="field"><label for="year-to">出版年月到</label><input id="year-to" type="month" value="${escapeHtml(state.searchYearTo)}" /></div>
             <div class="field"><label for="search-limit">最大数量</label><input id="search-limit" type="number" min="1" max="40" value="${state.searchLimit}" /></div>
           </div>
+          <div class="notice">
+            本步骤用于发现候选书，不代表 AI 已完成筛选。请先人工勾选确认，再交给 AI 初筛。<br />
+            如果图书简介、目录、书评等信息不足，系统会标记为需人工复核，AI 不会凭空补全事实。
+          </div>
           <p>查询顺序：当当图书、京东图书、豆瓣图书、Google Books、Open Library。任一来源失败不会阻断流程，缺少出版时间的书会保留并交给人工复核。</p>
           ${state.searchSourceWarnings.length ? `<p>来源提示：${state.searchSourceWarnings.map(escapeHtml).join("；")}，其他来源结果仍可继续使用。</p>` : ""}
-          <div class="actions"><button class="button" data-action="search-online">${state.searchStatus === "loading" ? "正在查询…" : "查询网上书单"}</button></div>
+          <div class="actions"><button class="button" data-action="search-online">${state.searchStatus === "loading" ? "正在搜索候选书…" : "搜索候选书"}</button></div>
         </section>
         ${state.searchResults.length ? `
           <section class="panel result-panel">
-            <h3>查询结果：${state.searchResults.length} 本</h3>
+            <h3>候选书池：${state.searchResults.length} 本，请人工勾选</h3>
             <div class="selection-list">${state.searchResults.map((book) => `
               <label class="selection-row"><input type="checkbox" data-search-id="${book.id}" ${state.searchSelected[book.id] ? "checked" : ""} />
-                <span><strong>${escapeHtml(book.title)}</strong><br />${escapeHtml(book.author || "作者缺失")} · ${escapeHtml(book.publisher || "出版社缺失")} · ${escapeHtml(book.publishDate || book.date || "出版时间缺失，需人工复核")} · ${escapeHtml(book.isbn || "ISBN 缺失")}<br />来源：${escapeHtml((book.dataSource || []).join("、") || book.source || "未知")} ${book.needsReview ? `· 需复核：${escapeHtml(book.reviewReason || "信息不完整")}` : ""}</span>
+                <span><strong>${escapeHtml(book.title)}</strong><br />${escapeHtml(book.author || "作者缺失")} · ${escapeHtml(book.publisher || "出版社缺失")} · ${escapeHtml(book.publishDate || book.date || "出版时间缺失，需人工复核")} · ${escapeHtml(book.isbn || "ISBN 缺失")}<br />候选原因：${escapeHtml(book.candidateReason || "来源返回的相关候选书")} · 信息完整度：${escapeHtml(book.infoCompleteness || "poor")} · 来源可信度：${escapeHtml(book.sourceConfidence || "low")}<br />来源：${escapeHtml((book.dataSource || []).join("、") || book.source || "未知")} ${book.needsReview ? `· 需复核：${escapeHtml(book.reviewReason || "信息不完整")}` : ""}</span>
               </label>`).join("")}</div>
-            <div class="actions"><button class="button" data-action="import-search">导入已勾选书目</button></div>
+            <div class="actions"><button class="button" data-action="import-search">导入已勾选候选书</button></div>
           </section>` : ""}
       ` : ""}
 
@@ -971,6 +1064,7 @@ function pageScreen() {
             ${ratingTag(selected.rating)}
           </div>
           <dl class="detail-list">
+            <dt>AI 初筛结论</dt><dd>${escapeHtml(selected.candidateDecision || "待人工判断")}</dd>
             <dt>推荐理由</dt><dd>${escapeHtml(selected.reason)}</dd>
             <dt>风险提醒</dt><dd>${escapeHtml(selected.risk)}</dd>
             <dt>建议书架</dt><dd>${escapeHtml(selected.shelf)}</dd>
@@ -1032,6 +1126,10 @@ function pageReview() {
             </div>
           ` : ""}
           <dl class="detail-list">
+            <dt>信息完整度</dt><dd>${escapeHtml(book.infoCompleteness || "poor")}</dd>
+            <dt>候选原因</dt><dd>${escapeHtml(book.candidateReason || "人工导入的候选书")}</dd>
+            <dt>来源可信度</dt><dd>${escapeHtml(book.sourceConfidence || "low")}</dd>
+            <dt>AI 初筛结论</dt><dd>${escapeHtml(book.candidateDecision || "待人工判断")}</dd>
             <dt>AI 推荐理由</dt><dd>${escapeHtml(book.reason)}</dd>
             <dt>AI 风险提醒</dt><dd>${escapeHtml(book.risk)}</dd>
             <dt>建议书架</dt><dd>${escapeHtml(book.shelf)}</dd>
@@ -1055,9 +1153,14 @@ function pageReview() {
               ${editableBookField("price", "价格", book.price)}
               ${editableBookField("dataSource", "数据来源", (book.dataSource || []).join("、"))}
               ${editableBookField("confidence", "可信度", book.confidence)}
+              ${editableBookField("sourceConfidence", "来源可信度", book.sourceConfidence)}
+              ${editableBookField("infoCompleteness", "信息完整度", book.infoCompleteness)}
+              ${editableBookField("candidateReason", "候选原因", book.candidateReason)}
               ${editableBookField("missingFields", "缺失字段", (book.missingFields || []).join("、"))}
             </div>
             <div class="field"><label for="book-field-summary">简介</label><textarea id="book-field-summary" data-book-field="summary">${escapeHtml(book.summary)}</textarea></div>
+            <div class="field"><label for="book-field-catalog">目录</label><textarea id="book-field-catalog" data-book-field="catalog">${escapeHtml(book.catalog)}</textarea></div>
+            <div class="field"><label for="book-field-reviewExcerpt">书评或来源摘要</label><textarea id="book-field-reviewExcerpt" data-book-field="reviewExcerpt">${escapeHtml(book.reviewExcerpt)}</textarea></div>
             <div class="field"><label for="book-field-enrichmentRisk">风险提示</label><textarea id="book-field-enrichmentRisk" data-book-field="enrichmentRisk">${escapeHtml(book.enrichmentRisk)}</textarea></div>
           </details>
 
@@ -1311,9 +1414,16 @@ function screeningInput() {
       pages: book.pages,
       binding: book.binding,
       description: book.summary,
+      catalog: book.catalog,
+      review_excerpt: book.reviewExcerpt,
       price: book.price ?? null,
       data_source: book.dataSource,
       confidence: book.confidence,
+      source_confidence: book.sourceConfidence,
+      info_completeness: book.infoCompleteness,
+      needs_review: book.needsReview,
+      review_reason: book.reviewReason,
+      candidate_reason: book.candidateReason,
       missing_fields: book.missingFields,
       enrichment_risk: book.enrichmentRisk,
       is_recent: true,
@@ -1365,8 +1475,9 @@ async function screenWithDeepSeek() {
         summary: confirmedValue(book.summary, enriched.description),
         price: confirmedValue(book.price, enriched.price),
         rating: result.rating,
+        candidateDecision: result.candidate_decision || "待人工判断",
         reason: result.reason,
-        risk: result.risks?.join("；") || "无明确风险，仍需人工复核。",
+        risk: [...(result.risks || []), ...(result.missing_information || []).map((item) => `信息不足：${item}`)].join("；") || "无明确风险，仍需人工复核。",
         shelf: result.shelf_theme,
         enrichment: `可信度：${result.enrichment_confidence || "低"}。${
           result.enrichment_notes?.join("；") || "补全内容仍需人工确认。"

@@ -5,6 +5,7 @@ import {
 
 const DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions";
 const ALLOWED_RATINGS = new Set(["A", "B", "C", "D"]);
+const ALLOWED_CANDIDATE_DECISIONS = new Set(["推荐", "不推荐", "待人工判断"]);
 const BATCH_SIZE = 10;
 const MAX_ATTEMPTS = 2;
 
@@ -51,26 +52,26 @@ function normalizeStringArray(value) {
     : [];
 }
 
-function normalizeEnrichedFields(value) {
-  const fields = [
-    "isbn",
-    "author",
-    "translator",
-    "publisher",
-    "publish_date",
-    "publish_year",
-    "category",
-    "keywords",
-    "pages",
-    "binding",
-    "description",
-    "price",
-  ];
+function normalizeEnrichedFields(book) {
+  const inputFields = {
+    isbn: book.isbn,
+    author: book.author,
+    translator: book.translator,
+    publisher: book.publisher,
+    publish_date: book.publish_date,
+    publish_year: book.publish_year,
+    category: book.category,
+    keywords: Array.isArray(book.keywords) ? book.keywords.join("、") : book.keywords,
+    pages: book.pages,
+    binding: book.binding,
+    description: book.description,
+    price: book.price,
+  };
   return Object.fromEntries(
-    fields.map((field) => [
+    Object.entries(inputFields).map(([field, value]) => [
       field,
-      typeof value?.[field] === "string" && value[field].trim()
-        ? value[field].trim()
+      typeof value === "string" && value.trim() && value !== "待补充"
+        ? value.trim()
         : "待人工确认",
     ]),
   );
@@ -91,23 +92,44 @@ function normalizeResults(payload, books) {
       throw new Error(`书籍 ${book.id} 缺少有效的 A/B/C/D 判断`);
     }
 
+    const incomplete = book.info_completeness === "poor" || book.needs_review === true;
+    const missingInformation = [
+      ...normalizeStringArray(result.missing_information),
+      ...(Array.isArray(book.missing_fields) ? book.missing_fields : []),
+    ];
+    if (!book.description) missingInformation.push("图书简介");
+    if (!book.catalog) missingInformation.push("目录");
+    if (!book.review_excerpt) missingInformation.push("书评或来源摘要");
+    const risks = normalizeStringArray(result.risks);
+    if (incomplete) risks.push("图书信息不完整，AI 判断置信度已降低，必须人工复核");
+
+    const candidateDecision = ALLOWED_CANDIDATE_DECISIONS.has(result.candidate_decision)
+      ? result.candidate_decision
+      : result.rating === "D"
+        ? "不推荐"
+        : result.rating === "A" || result.rating === "B"
+          ? "推荐"
+          : "待人工判断";
+
     return {
       id: book.id,
-      rating: result.rating,
+      rating: incomplete && result.rating === "A" ? "C" : result.rating,
       candidate_decision:
-        typeof result.candidate_decision === "string"
-          ? result.candidate_decision
-          : "需要人工判断",
+        incomplete
+          ? "待人工判断"
+          : candidateDecision,
       reason:
         typeof result.reason === "string" ? result.reason : "需要人工进一步判断",
-      risks: normalizeStringArray(result.risks),
+      risks: [...new Set(risks)].slice(0, 10),
       shelf_theme:
         typeof result.shelf_theme === "string" ? result.shelf_theme : "待人工确认",
       needs_human_review: true,
       human_review_questions: normalizeStringArray(result.human_review_questions),
-      missing_information: normalizeStringArray(result.missing_information),
-      enriched_fields: normalizeEnrichedFields(result.enriched_fields),
-      enrichment_confidence: ["高", "中", "低"].includes(result.enrichment_confidence)
+      missing_information: [...new Set(missingInformation)].slice(0, 15),
+      enriched_fields: normalizeEnrichedFields(book),
+      enrichment_confidence: incomplete
+        ? "低"
+        : ["高", "中", "低"].includes(result.enrichment_confidence)
         ? result.enrichment_confidence
         : "低",
       enrichment_notes: normalizeStringArray(result.enrichment_notes),
