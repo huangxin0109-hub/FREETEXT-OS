@@ -8,6 +8,15 @@ function jsonResponse(body, status = 200) {
   });
 }
 
+function dateParts(value) {
+  const match = String(value || "").match(/\b(\d{4})(?:[-/.年](\d{1,2}))?/);
+  return {
+    publishDate: match?.[0] || "",
+    publishYear: match?.[1] || "",
+    publishMonth: match?.[2] ? `${match[1]}-${String(match[2]).padStart(2, "0")}` : "",
+  };
+}
+
 export async function onRequestGet(context) {
   const url = new URL(context.request.url);
   const query = url.searchParams.get("q")?.trim();
@@ -29,18 +38,43 @@ export async function onRequestGet(context) {
     const dataText = html.match(/window\.__DATA__\s*=\s*(\{.*?\});/s)?.[1];
     if (!dataText) throw new Error("豆瓣官网未返回可识别的搜索数据");
     const data = JSON.parse(dataText);
-    return jsonResponse({
-      source: "豆瓣官网",
-      warning: data.error_info || "",
-      items: (data.items || []).slice(0, limit).map((item) => ({
+    const items = (data.items || []).slice(0, limit).map((item) => {
+      const summary = item.abstract || item.abstract_2 || "";
+      const details = summary.split("/").map((part) => part.trim()).filter(Boolean);
+      const date = dateParts(summary);
+      const reasons = [];
+      if (!date.publishYear) reasons.push("出版时间缺失，需人工复核");
+      else if (!date.publishMonth) reasons.push("出版月份缺失，需人工复核");
+      reasons.push("豆瓣搜索摘要字段有限，具体版本需人工复核");
+      return {
         title: item.title || "",
-        author_name: item.author_name || "",
-        abstract: item.abstract || item.abstract_2 || "",
-        url: item.url || "",
-      })),
+        author: item.author_name || details[0] || "",
+        isbn: "",
+        publisher: details.find((part) => /出版社|书店|Press|Publishing/i.test(part)) || "",
+        ...date,
+        pages: "",
+        coverUrl: item.cover_url || "",
+        source: "豆瓣图书搜索代理",
+        sourceStatus: "partial",
+        needsReview: true,
+        reviewReason: reasons.join("；"),
+        summary,
+        sourceUrl: item.url || "",
+      };
+    });
+    return jsonResponse({
+      source: "豆瓣图书搜索代理",
+      sourceStatus: items.length ? "success" : "unavailable",
+      message: data.error_info || (items.length ? "" : "豆瓣暂未返回结果"),
+      items,
     });
   } catch (error) {
-    return jsonResponse({ source: "豆瓣官网", warning: error.message, items: [] }, 200);
+    return jsonResponse({
+      source: "豆瓣图书搜索代理",
+      sourceStatus: "unavailable",
+      message: `豆瓣暂时不可用：${error.message}`,
+      items: [],
+    });
   }
 }
 

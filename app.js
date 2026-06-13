@@ -194,6 +194,14 @@ function emptyBook(id, title = "", isbn = "") {
     binding: "待补充",
     price: null,
     summary: "",
+    publishDate: "",
+    publishYear: "",
+    publishMonth: "",
+    coverUrl: "",
+    source: "",
+    sourceStatus: "pending",
+    needsReview: true,
+    reviewReason: "待补充信息需人工确认",
     dataSource: [],
     confidence: "低",
     missingFields: [],
@@ -277,6 +285,43 @@ function parseBookInput(text) {
   return { books, errors, warnings };
 }
 
+function normalizeSearchResult(item = {}, source = "公开图书来源") {
+  const publishDate = item.publishDate || item.date || "";
+  const dateInfo = publicationDateInfo(publishDate || item.publishYear || item.year);
+  const reasons = String(item.reviewReason || "")
+    .split(/[；;]/)
+    .map((reason) => reason.trim())
+    .filter(Boolean);
+  if (!dateInfo.year) reasons.push("出版时间缺失，需人工复核");
+  else if (!dateInfo.month) reasons.push("出版月份缺失，需人工复核");
+  const needsReview = Boolean(item.needsReview || reasons.length);
+  return {
+    ...item,
+    title: item.title || "",
+    author: item.author || "",
+    isbn: cleanIsbn(item.isbn),
+    publisher: item.publisher || "",
+    publishDate,
+    publishYear: item.publishYear || dateInfo.year,
+    publishMonth: item.publishMonth || dateInfo.month,
+    pages: item.pages || "",
+    coverUrl: item.coverUrl || "",
+    source,
+    sourceStatus: item.sourceStatus || "success",
+    needsReview,
+    reviewReason: [...new Set(reasons)].join("；"),
+    date: publishDate,
+    year: item.publishYear || dateInfo.year,
+    dataSource: [...new Set([...(item.dataSource || []), source])],
+    translator: item.translator || "",
+    category: item.category || "",
+    keywords: item.keywords || [],
+    binding: item.binding || "",
+    price: item.price || "",
+    summary: item.summary || "",
+  };
+}
+
 function normalizeGoogleBook(item, source = "Google Books") {
   const info = item?.volumeInfo || {};
   const sale = item?.saleInfo || {};
@@ -285,14 +330,13 @@ function normalizeGoogleBook(item, source = "Google Books") {
     identifiers.find((entry) => entry.type === "ISBN_13")?.identifier ||
     identifiers.find((entry) => entry.type === "ISBN_10")?.identifier ||
     "";
-  return {
+  return normalizeSearchResult({
     title: info.title || "",
     isbn: cleanIsbn(isbn),
     author: (info.authors || []).join("、"),
     translator: "",
     publisher: info.publisher || "",
-    date: info.publishedDate || "",
-    year: String(info.publishedDate || "").match(/\d{4}/)?.[0] || "",
+    publishDate: info.publishedDate || "",
     category: (info.categories || []).join("、"),
     keywords: info.categories || [],
     pages: info.pageCount ? String(info.pageCount) : "",
@@ -301,50 +345,31 @@ function normalizeGoogleBook(item, source = "Google Books") {
       ? `${sale.listPrice.amount} ${sale.listPrice.currencyCode}`
       : "",
     summary: info.description || "",
-    dataSource: [source],
-  };
+    coverUrl: info.imageLinks?.thumbnail || "",
+  }, source);
 }
 
 function normalizeOpenLibrary(doc, source = "Open Library") {
   const isbn = Array.isArray(doc?.isbn) ? doc.isbn.find((value) => cleanIsbn(value)) : doc?.isbn_13?.[0] || doc?.isbn_10?.[0] || "";
-  return {
+  return normalizeSearchResult({
     title: doc?.title || "",
     isbn: cleanIsbn(isbn),
     author: (doc?.author_name || []).join("、"),
     translator: "",
     publisher: (doc?.publisher || []).slice(0, 2).join("、"),
-    date: doc?.first_publish_year ? String(doc.first_publish_year) : "",
-    year: doc?.first_publish_year ? String(doc.first_publish_year) : "",
+    publishDate: doc?.first_publish_year ? String(doc.first_publish_year) : "",
     category: (doc?.subject || []).slice(0, 3).join("、"),
     keywords: (doc?.subject || []).slice(0, 8),
     pages: doc?.number_of_pages_median ? String(doc.number_of_pages_median) : "",
     binding: "",
     price: "",
     summary: "",
-    dataSource: [source],
-  };
+    coverUrl: doc?.cover_i ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg` : "",
+  }, source);
 }
 
-function normalizeDoubanBook(item, source = "豆瓣官网") {
-  const abstract = String(item?.abstract || item?.abstract_2 || "");
-  const isbn = cleanIsbn(abstract);
-  const date = abstract.match(/\b(?:19|20)\d{2}(?:-\d{1,2})?(?:-\d{1,2})?\b/)?.[0] || "";
-  return {
-    title: item?.title || "",
-    isbn,
-    author: item?.author_name || "",
-    translator: "",
-    publisher: "",
-    date,
-    year: date.match(/\d{4}/)?.[0] || "",
-    category: "待补充",
-    keywords: [],
-    pages: "",
-    binding: "",
-    price: "",
-    summary: abstract,
-    dataSource: [source],
-  };
+function normalizeProxyBook(item, source) {
+  return normalizeSearchResult(item, item?.source || source);
 }
 
 function useful(value) {
@@ -368,11 +393,26 @@ function mergeBookData(base, additions) {
       "binding",
       "price",
       "summary",
+      "publishDate",
+      "publishYear",
+      "publishMonth",
+      "coverUrl",
+      "source",
+      "sourceStatus",
     ].forEach((field) => {
       if (!useful(merged[field]) && useful(addition[field])) merged[field] = addition[field];
     });
     merged.keywords = [...new Set([...(merged.keywords || []), ...(addition.keywords || [])])].slice(0, 10);
     merged.dataSource = [...new Set([...(merged.dataSource || []), ...(addition.dataSource || [])])];
+    if (merged.sourceStatus === "pending" && addition.sourceStatus) merged.sourceStatus = addition.sourceStatus;
+    merged.needsReview = Boolean(merged.needsReview || addition.needsReview);
+    merged.reviewReason = [...new Set(
+      [merged.reviewReason, addition.reviewReason]
+        .filter(Boolean)
+        .flatMap((value) => String(value).split(/[；;]/))
+        .map((value) => value.trim())
+        .filter(Boolean),
+    )].join("；");
   });
   const required = ["isbn", "author", "translator", "publisher", "date", "year", "category", "keywords", "pages", "binding", "price", "summary"];
   merged.missingFields = required.filter((field) => !useful(merged[field]) || (Array.isArray(merged[field]) && !merged[field].length));
@@ -384,6 +424,19 @@ function mergeBookData(base, additions) {
       : "公开数据字段较完整，仍需人工确认具体版本。",
     dateRisk,
   ].filter(Boolean).join(" ");
+  const finalDate = publicationDateInfo(merged.publishDate || merged.date || merged.publishYear || merged.year);
+  merged.publishDate = useful(merged.publishDate) ? merged.publishDate : useful(merged.date) ? merged.date : "";
+  merged.publishYear = useful(merged.publishYear) ? merged.publishYear : finalDate.year;
+  merged.publishMonth = useful(merged.publishMonth) ? merged.publishMonth : finalDate.month;
+  merged.date = useful(merged.date) ? merged.date : merged.publishDate;
+  merged.year = useful(merged.year) ? merged.year : merged.publishYear;
+  if (!merged.publishYear) {
+    merged.needsReview = true;
+    merged.reviewReason = [merged.reviewReason, "出版时间缺失，需人工复核"].filter(Boolean).join("；");
+  } else if (!merged.publishMonth) {
+    merged.needsReview = true;
+    merged.reviewReason = [merged.reviewReason, "出版月份缺失，需人工复核"].filter(Boolean).join("；");
+  }
   return merged;
 }
 
@@ -408,11 +461,25 @@ async function lookupOpenLibrary(query, limit = 5) {
 }
 
 async function lookupDouban(query, limit = 5) {
+  return lookupProxy("/api/search-douban", query, limit, "豆瓣图书搜索代理");
+}
+
+async function lookupDangdang(query, limit = 5) {
+  return lookupProxy("/api/search-dangdang", query, limit, "当当图书搜索");
+}
+
+async function lookupJdBook(query, limit = 5) {
+  return lookupProxy("/api/search-jdbook", query, limit, "京东图书搜索");
+}
+
+async function lookupProxy(path, query, limit, source) {
   const data = await fetchJson(
-    `/api/search-douban?q=${encodeURIComponent(query)}&limit=${Math.min(limit, 20)}`,
+    `${path}?q=${encodeURIComponent(query)}&limit=${Math.min(limit, 20)}`,
   );
-  if (data.warning && !(data.items || []).length) throw new Error(`豆瓣官网：${data.warning}`);
-  return (data.items || []).map((item) => normalizeDoubanBook(item));
+  if (data.sourceStatus === "unavailable" && !(data.items || []).length) {
+    throw new Error(data.message || `${source}暂时不可用`);
+  }
+  return (data.items || []).map((item) => normalizeProxyBook(item, source));
 }
 
 async function enrichBook(book) {
@@ -421,7 +488,9 @@ async function enrichBook(book) {
     const exact = await Promise.allSettled([
       lookupGoogle(`isbn:${book.isbn}`, 3),
       lookupOpenLibrary(`isbn=${encodeURIComponent(book.isbn)}`, 3),
-      lookupDouban(book.isbn, 3),
+      lookupDangdang(book.title, 3),
+      lookupJdBook(book.title, 3),
+      lookupDouban(book.title, 3),
     ]);
     exact.forEach((result) => {
       if (result.status === "fulfilled" && result.value[0]) additions.push(result.value[0]);
@@ -429,9 +498,11 @@ async function enrichBook(book) {
   }
   if (!additions.length || additions.every((item) => !useful(item.author))) {
     const byTitle = await Promise.allSettled([
+      lookupDangdang(book.title, 3),
+      lookupJdBook(book.title, 3),
+      lookupDouban(book.title, 3),
       lookupGoogle(`intitle:${book.title}`, 3),
       lookupOpenLibrary(`title=${encodeURIComponent(book.title)}`, 3),
-      lookupDouban(book.title, 3),
     ]);
     byTitle.forEach((result) => {
       if (result.status === "fulfilled" && result.value[0]) additions.push(result.value[0]);
@@ -477,14 +548,16 @@ async function searchOnlineBooks() {
     const sourceWarnings = new Set();
     const searchSources = async (term) => {
       const sources = [
+        ["当当图书搜索", lookupDangdang(term, limit)],
+        ["京东图书搜索", lookupJdBook(term, limit)],
+        ["豆瓣图书搜索代理", lookupDouban(term, limit)],
         ["Google Books", lookupGoogle(term, Math.max(limit, 40))],
         ["Open Library", lookupOpenLibrary(`q=${encodeURIComponent(term)}`, 100)],
-        ["豆瓣官网", lookupDouban(term, limit)],
       ];
       const results = await Promise.allSettled(sources.map(([, request]) => request));
       return results.flatMap((result, index) => {
         if (result.status === "fulfilled") return result.value;
-        sourceWarnings.add(`${sources[index][0]}暂时不可用`);
+        sourceWarnings.add(`${sources[index][0]}暂时不可用：${result.reason?.message || "请稍后重试"}`);
         return [];
       });
     };
@@ -506,17 +579,21 @@ async function searchOnlineBooks() {
     }
     const byKey = new Map();
     combined.forEach((book) => {
-      const publishDate = publicationDateInfo(book.date || book.year);
+      const publishDate = publicationDateInfo(book.publishDate || book.date || book.publishYear || book.year);
       const fromYear = yearFrom.slice(0, 4);
       const toYear = yearTo.slice(0, 4);
       if (publishDate.month && ((yearFrom && publishDate.month < yearFrom) || (yearTo && publishDate.month > yearTo))) return;
       if (!publishDate.month && publishDate.year && ((fromYear && publishDate.year < fromYear) || (toYear && publishDate.year > toYear))) return;
       if (!publishDate.year) {
         book.enrichmentRisk = [book.enrichmentRisk, "出版时间缺失，需人工复核。"].filter(Boolean).join(" ");
+        book.needsReview = true;
+        book.reviewReason = [book.reviewReason, "出版时间缺失，需人工复核"].filter(Boolean).join("；");
       } else if (!publishDate.month) {
         book.enrichmentRisk = [book.enrichmentRisk, "出版月份缺失，需人工复核。"].filter(Boolean).join(" ");
+        book.needsReview = true;
+        book.reviewReason = [book.reviewReason, "出版月份缺失，需人工复核"].filter(Boolean).join("；");
       }
-      const key = book.isbn || `${book.title}-${book.author}`;
+      const key = book.isbn || `${String(book.title).trim().toLowerCase()}-${String(book.author).trim().toLowerCase()}`;
       byKey.set(key, mergeBookData(byKey.get(key) || emptyBook(`search-${byKey.size + 1}`, book.title, book.isbn), [book]));
     });
     state.searchResults = [...byKey.values()].slice(0, limit).map((book, index) => ({ ...book, id: `search-${index + 1}` }));
@@ -524,7 +601,7 @@ async function searchOnlineBooks() {
     state.searchSourceWarnings = [...sourceWarnings];
     state.searchStatus = "success";
     if (!state.searchResults.length) {
-      state.inputErrors = ["公开图书 API 暂未返回符合年份范围的结果，请放宽年份或更换关键词。"];
+      state.inputErrors = ["五个图书来源暂未返回符合年月范围的结果，请放宽年月、换关键词，或使用粘贴/附件导入。"];
     }
     render({ scrollToTop: false });
   } catch {
@@ -778,7 +855,7 @@ function pageGenerate() {
             <div class="field"><label for="year-to">出版年月到</label><input id="year-to" type="month" value="${escapeHtml(state.searchYearTo)}" /></div>
             <div class="field"><label for="search-limit">最大数量</label><input id="search-limit" type="number" min="1" max="40" value="${state.searchLimit}" /></div>
           </div>
-          <p>查询来源：Google Books、Open Library、豆瓣官网。缺少出版时间的书会保留并交给人工复核。</p>
+          <p>查询顺序：当当图书、京东图书、豆瓣图书、Google Books、Open Library。任一来源失败不会阻断流程，缺少出版时间的书会保留并交给人工复核。</p>
           ${state.searchSourceWarnings.length ? `<p>来源提示：${state.searchSourceWarnings.map(escapeHtml).join("；")}，其他来源结果仍可继续使用。</p>` : ""}
           <div class="actions"><button class="button" data-action="search-online">${state.searchStatus === "loading" ? "正在查询…" : "查询网上书单"}</button></div>
         </section>
@@ -787,7 +864,7 @@ function pageGenerate() {
             <h3>查询结果：${state.searchResults.length} 本</h3>
             <div class="selection-list">${state.searchResults.map((book) => `
               <label class="selection-row"><input type="checkbox" data-search-id="${book.id}" ${state.searchSelected[book.id] ? "checked" : ""} />
-                <span><strong>${escapeHtml(book.title)}</strong><br />${escapeHtml(book.author)} · ${escapeHtml(book.publisher)} · ${escapeHtml(book.date || "出版时间缺失，需人工复核")} · ${escapeHtml(book.isbn)}</span>
+                <span><strong>${escapeHtml(book.title)}</strong><br />${escapeHtml(book.author || "作者缺失")} · ${escapeHtml(book.publisher || "出版社缺失")} · ${escapeHtml(book.publishDate || book.date || "出版时间缺失，需人工复核")} · ${escapeHtml(book.isbn || "ISBN 缺失")}<br />来源：${escapeHtml((book.dataSource || []).join("、") || book.source || "未知")} ${book.needsReview ? `· 需复核：${escapeHtml(book.reviewReason || "信息不完整")}` : ""}</span>
               </label>`).join("")}</div>
             <div class="actions"><button class="button" data-action="import-search">导入已勾选书目</button></div>
           </section>` : ""}
@@ -948,6 +1025,12 @@ function pageReview() {
             </div>
             ${ratingTag(book.rating)}
           </div>
+          ${book.needsReview === true ? `
+            <div class="notice">
+              <strong>需人工复核</strong><br />
+              原因：${escapeHtml(book.reviewReason || "图书信息不完整，需人工确认")}
+            </div>
+          ` : ""}
           <dl class="detail-list">
             <dt>AI 推荐理由</dt><dd>${escapeHtml(book.reason)}</dd>
             <dt>AI 风险提醒</dt><dd>${escapeHtml(book.risk)}</dd>
