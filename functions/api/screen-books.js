@@ -33,8 +33,8 @@ function validateInput(input) {
   if (!input || !Array.isArray(input.books)) {
     return "books 必须是数组";
   }
-  if (input.books.length < 1 || input.books.length > 20) {
-    return "每次必须提交 1 至 20 本候选书";
+  if (input.books.length < 1 || input.books.length > 100) {
+    return "每次必须提交 1 至 100 本候选书";
   }
   if (
     input.books.some(

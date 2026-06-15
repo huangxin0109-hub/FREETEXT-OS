@@ -113,6 +113,9 @@ const mockBooks = [
   },
 ];
 
+const MAX_CANDIDATE_BOOKS = 100;
+const MISSING_TEXT = "缺失 / 需人工补充";
+
 const state = {
   generated: false,
   books: mockBooks,
@@ -126,7 +129,7 @@ const state = {
   searchQuery: "",
   searchYearFrom: "2015-01",
   searchYearTo: "2026-12",
-  searchLimit: 20,
+  searchLimit: MAX_CANDIDATE_BOOKS,
   searchStatus: "idle",
   searchResults: [],
   searchSelected: {},
@@ -156,6 +159,10 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function displayField(value) {
+  return useful(value) ? String(value) : MISSING_TEXT;
 }
 
 function isHeaderRow(fields) {
@@ -243,13 +250,26 @@ function parseBookInput(text) {
         errors.push(`第 ${lineNumber} 行缺少书名。`);
         return;
       }
-      books.push(emptyBook(`input-${books.length + 1}`, title, rowIsbn));
+      books.push({
+        ...emptyBook(`input-${books.length + 1}`, title, rowIsbn),
+        sourceConfidence: rowIsbn ? "low" : "low",
+        infoCompleteness: "poor",
+        candidateReason: "人工粘贴候选书单",
+      });
       return;
     }
 
-    const [rawTitle, author, publisher, date, category, summary, price] = fields;
+    const thirdFieldIsIsbn = Boolean(cleanIsbn(fields[2]));
+    const rawTitle = fields[0];
+    const author = fields[1];
+    const fieldIsbn = thirdFieldIsIsbn ? fields[2] : "";
+    const publisher = thirdFieldIsIsbn ? fields[3] : fields[2];
+    const date = thirdFieldIsIsbn ? fields[4] : fields[3];
+    const category = thirdFieldIsIsbn ? fields[5] : fields[4];
+    const summary = thirdFieldIsIsbn ? fields[6] : fields[5];
+    const price = thirdFieldIsIsbn ? fields[7] : fields[6];
     const titleIsbn = cleanIsbn(rawTitle);
-    const isbn = rowIsbn || titleIsbn;
+    const isbn = rowIsbn || titleIsbn || cleanIsbn(fieldIsbn);
     const title = cleanTitle(rawTitle, isbn);
     if (!title) errors.push(`第 ${lineNumber} 行缺少书名。`);
     if (!title) return;
@@ -277,11 +297,15 @@ function parseBookInput(text) {
       category: category || "待补充",
       summary: summary || "",
       price: price || null,
+      sourceConfidence: "high",
+      infoCompleteness: summary && author && publisher && date ? "partial" : "poor",
+      candidateReason: "人工粘贴候选书单",
     });
   });
 
-  if (books.length > 20) {
-    errors.push(`当前共有 ${books.length} 本书，单次最多 20 本，请分批测试。`);
+  if (books.length > MAX_CANDIDATE_BOOKS) {
+    warnings.push(`当前识别 ${books.length} 本，当前版本最多支持 ${MAX_CANDIDATE_BOOKS} 本进入本轮初筛，已先保留前 ${MAX_CANDIDATE_BOOKS} 本。`);
+    books.splice(MAX_CANDIDATE_BOOKS);
   }
   if (!books.length && !errors.length) {
     errors.push("请至少粘贴 1 本候选书。");
@@ -305,7 +329,7 @@ function normalizeSearchResult(item = {}, source = "公开图书来源") {
   const summary = item.summary || "";
   const catalog = item.catalog || "";
   const reviewExcerpt = item.reviewExcerpt || "";
-  const coreFields = [item.title, item.author, item.publisher, publishDate, summary];
+  const coreFields = [item.title, item.author, item.publisher, publishDate, item.isbn, summary];
   const coreCount = coreFields.filter(useful).length;
   const infoCompleteness = item.infoCompleteness || (
     coreCount === coreFields.length && (catalog || reviewExcerpt)
@@ -474,9 +498,9 @@ function mergeBookData(base, additions) {
     merged.needsReview = true;
     merged.reviewReason = [merged.reviewReason, "出版月份缺失，需人工复核"].filter(Boolean).join("；");
   }
-  const contentCount = [merged.title, merged.author, merged.publisher, merged.publishDate, merged.summary]
+  const contentCount = [merged.title, merged.author, merged.publisher, merged.publishDate, merged.isbn, merged.summary]
     .filter(useful).length;
-  merged.infoCompleteness = contentCount === 5 && (useful(merged.catalog) || useful(merged.reviewExcerpt))
+  merged.infoCompleteness = contentCount === 6 && (useful(merged.catalog) || useful(merged.reviewExcerpt))
     ? "complete"
     : contentCount >= 4
       ? "partial"
@@ -555,7 +579,7 @@ async function lookupJdBook(query, limit = 5) {
 
 async function lookupProxy(path, query, limit, source) {
   const data = await fetchJson(
-    `${path}?q=${encodeURIComponent(query)}&limit=${Math.min(limit, 20)}`,
+    `${path}?q=${encodeURIComponent(query)}&limit=${Math.min(limit, MAX_CANDIDATE_BOOKS)}`,
   );
   if (data.sourceStatus === "unavailable" && !(data.items || []).length) {
     throw new Error(data.message || `${source}暂时不可用`);
@@ -617,9 +641,9 @@ async function searchOnlineBooks() {
   const query = document.querySelector("#search-query")?.value.trim() || state.searchQuery;
   let yearFrom = document.querySelector("#year-from")?.value || state.searchYearFrom;
   let yearTo = document.querySelector("#year-to")?.value || state.searchYearTo;
-  const limit = Math.min(40, Math.max(1, Number(document.querySelector("#search-limit")?.value || state.searchLimit)));
+  const limit = Math.min(MAX_CANDIDATE_BOOKS, Math.max(1, Number(document.querySelector("#search-limit")?.value || state.searchLimit)));
   if (!query) {
-    state.inputErrors = ["请输入网上书单查询关键词。"];
+    state.inputErrors = ["请输入辅助查询关键词。"];
     render();
     return;
   }
@@ -636,9 +660,9 @@ async function searchOnlineBooks() {
     const sourceWarnings = new Set();
     const searchSources = async (term) => {
       const sources = [
-        ["当当图书搜索", lookupDangdang(term, Math.max(limit, 20))],
-        ["京东图书搜索", lookupJdBook(term, Math.max(limit, 20))],
-        ["豆瓣图书搜索代理", lookupDouban(term, Math.max(limit, 20))],
+        ["当当图书搜索", lookupDangdang(term, Math.max(limit, MAX_CANDIDATE_BOOKS))],
+        ["京东图书搜索", lookupJdBook(term, Math.max(limit, MAX_CANDIDATE_BOOKS))],
+        ["豆瓣图书搜索代理", lookupDouban(term, Math.max(limit, MAX_CANDIDATE_BOOKS))],
         ["Google Books", lookupGoogle(term, Math.max(limit, 40))],
         ["Open Library", lookupOpenLibrary(`q=${encodeURIComponent(term)}`, 100)],
       ];
@@ -714,7 +738,7 @@ function publicationDateInfo(value) {
 function importSelectedSearchBooks() {
   const selected = state.searchResults.filter((book) => state.searchSelected[book.id]);
   if (!selected.length) {
-    state.inputErrors = ["请先人工勾选至少 1 本候选书，再确认导入。"];
+    state.inputErrors = ["请先勾选需要导入的候选书。"];
     render({ scrollToTop: false });
     return;
   }
@@ -773,7 +797,7 @@ function rowsToBooks(rows) {
     ? headerMap
     : { title: 0, author: 1, isbn: 2, publisher: 3, date: 4, category: 5, summary: 6, price: 7 };
   const cell = (row, field) => columnIndex[field] === undefined ? "" : row[columnIndex[field]] || "";
-  return normalizedRows.slice(0, 40).map((row, index) => {
+  return normalizedRows.slice(0, MAX_CANDIDATE_BOOKS).map((row, index) => {
     const isbn = cleanIsbn(cell(row, "isbn")) || cleanIsbn(row.join(" "));
     const title = cleanTitle(cell(row, "title"), isbn);
     const date = cell(row, "date");
@@ -786,6 +810,9 @@ function rowsToBooks(rows) {
       category: cell(row, "category") || "待补充",
       summary: cell(row, "summary"),
       price: cell(row, "price") || null,
+      sourceConfidence: hasHeader ? "high" : "medium",
+      infoCompleteness: cell(row, "summary") && cell(row, "author") && cell(row, "publisher") && date ? "partial" : "poor",
+      candidateReason: hasHeader ? "结构化 Excel 候选书单" : "附件导入候选书单",
     };
   }).filter((book) => book.title);
 }
@@ -827,10 +854,10 @@ async function handleAttachment(file) {
 }
 
 function confirmAttachmentImport() {
-  state.books = state.attachmentPreview.slice(0, 20).map((book, index) => ({ ...book, id: `input-${index + 1}` }));
+  state.books = state.attachmentPreview.slice(0, MAX_CANDIDATE_BOOKS).map((book, index) => ({ ...book, id: `input-${index + 1}` }));
   state.originalBooks = structuredClone(state.books);
   state.inputMode = "attachment";
-  state.enrichmentMessage = `已从附件导入 ${state.books.length} 本书，可继续补全并初筛。`;
+  state.enrichmentMessage = `已从附件导入 ${state.books.length} / ${MAX_CANDIDATE_BOOKS} 本候选书，可继续补全并初筛。`;
   render({ scrollToTop: false });
 }
 
@@ -908,27 +935,31 @@ function pageGenerate() {
   const pastedCount = parseBookInput(state.bookInput).books.length;
   const activeCount = state.inputMode === "demo" ? mockBooks.length : state.books.length;
   const previewBooks = state.inputMode === "attachment" ? state.attachmentPreview : state.books;
+  const importedCount = state.inputMode === "real" ? pastedCount : activeCount;
   return `
     <section class="page">
       <div class="page-heading">
         <div>
-          <p class="eyebrow">第 2 步 · 候选生成与信息补全</p>
-          <h2>准备本月候选书</h2>
-          <p>书名必填，ISBN 可选。系统优先查询公开图书 API，DeepSeek 只负责整理和初筛。</p>
+          <p class="eyebrow">第 2 步 · 候选书单导入与信息检查</p>
+          <h2>导入本月候选书单</h2>
+          <p>请先导入已有候选书单。系统会识别书名、ISBN、作者、出版社、出版时间等字段，并对信息缺失的图书标记人工复核。</p>
         </div>
-        <span class="tag">${state.inputMode === "real" ? `已识别 ${pastedCount} 本` : `当前 ${activeCount} 本`}</span>
+        <span class="tag">本轮已导入 ${importedCount} / ${MAX_CANDIDATE_BOOKS} 本候选书</span>
+      </div>
+      <div class="notice">
+        主流程是：候选书单导入 → 字段识别 → 信息完整度检查 → 可选辅助补全 → DeepSeek 初筛 → 人工复核 → 最终清单。网上查询仅作为辅助补全，不保证所有图书信息完整。
       </div>
 
       <div class="filters" aria-label="书单导入方式">
-        <button class="filter ${state.inputMode === "real" ? "active" : ""}" data-input-mode="real">粘贴书单</button>
-        <button class="filter ${state.inputMode === "search" ? "active" : ""}" data-input-mode="search">找候选书</button>
-        <button class="filter ${state.inputMode === "attachment" ? "active" : ""}" data-input-mode="attachment">附件导入</button>
+        <button class="filter ${state.inputMode === "real" ? "active" : ""}" data-input-mode="real">粘贴书名 / ISBN</button>
+        <button class="filter ${state.inputMode === "attachment" ? "active" : ""}" data-input-mode="attachment">上传 TXT / DOCX / XLSX / XLS</button>
+        <button class="filter ${state.inputMode === "search" ? "active" : ""}" data-input-mode="search">辅助补全 / 可选查询</button>
         <button class="filter ${state.inputMode === "demo" ? "active" : ""}" data-input-mode="demo">8 本演示书单</button>
       </div>
 
       ${state.inputMode === "real" ? `
         <div class="field">
-          <label for="book-input">支持“书名 ISBN”、一行一本书，或使用 | 分隔完整字段</label>
+          <label for="book-input">批量导入候选书单：支持“书名 ISBN”、一行一本书，或使用 | 分隔完整字段</label>
           <textarea id="book-input" rows="12" placeholder="《乡土中国》 9787108069423
 艺术的故事
 书名 | 作者 | 出版社 | 出版时间 | 类别 | 简介 | 定价">${escapeHtml(state.bookInput)}</textarea>
@@ -937,27 +968,27 @@ function pageGenerate() {
 
       ${state.inputMode === "search" ? `
         <section class="panel">
-          <h3>候选书池搜索</h3>
+          <h3>辅助补全 / 可选查询</h3>
           <div class="form-grid">
             <div class="field"><label for="search-query">书名、作者、ISBN、分类、场景或年份</label><input id="search-query" value="${escapeHtml(state.searchQuery)}" placeholder="例如：中国美学、企业书单、2025 新书 艺术" /></div>
             <div class="field"><label for="year-from">出版年月从</label><input id="year-from" type="month" value="${escapeHtml(state.searchYearFrom)}" /></div>
             <div class="field"><label for="year-to">出版年月到</label><input id="year-to" type="month" value="${escapeHtml(state.searchYearTo)}" /></div>
-            <div class="field"><label for="search-limit">最大数量</label><input id="search-limit" type="number" min="1" max="40" value="${state.searchLimit}" /></div>
+            <div class="field"><label for="search-limit">最大数量</label><input id="search-limit" type="number" min="1" max="${MAX_CANDIDATE_BOOKS}" value="${state.searchLimit}" /></div>
           </div>
           <div class="notice">
             本步骤用于发现候选书，不代表 AI 已完成筛选。请先人工勾选确认，再交给 AI 初筛。<br />
             如果图书简介、目录、书评等信息不足，系统会标记为需人工复核，AI 不会凭空补全事实。
           </div>
-          <p>查询顺序：当当图书、京东图书、豆瓣图书、Google Books、Open Library。任一来源失败不会阻断流程，缺少出版时间的书会保留并交给人工复核。</p>
+          <p>查询顺序：当当图书、京东图书、豆瓣图书、Google Books、Open Library。任一来源失败不会阻断流程；查询结果只能作为候选信息，必须人工勾选后才会进入初筛。</p>
           ${state.searchSourceWarnings.length ? `<p>来源提示：${state.searchSourceWarnings.map(escapeHtml).join("；")}，其他来源结果仍可继续使用。</p>` : ""}
-          <div class="actions"><button class="button" data-action="search-online">${state.searchStatus === "loading" ? "正在搜索候选书…" : "搜索候选书"}</button></div>
+          <div class="actions"><button class="button" data-action="search-online">${state.searchStatus === "loading" ? "正在查询候选信息…" : "搜索候选书"}</button></div>
         </section>
         ${state.searchResults.length ? `
           <section class="panel result-panel">
             <h3>候选书池：${state.searchResults.length} 本，请人工勾选</h3>
             <div class="selection-list">${state.searchResults.map((book) => `
               <label class="selection-row"><input type="checkbox" data-search-id="${book.id}" ${state.searchSelected[book.id] ? "checked" : ""} />
-                <span><strong>${escapeHtml(book.title)}</strong><br />${escapeHtml(book.author || "作者缺失")} · ${escapeHtml(book.publisher || "出版社缺失")} · ${escapeHtml(book.publishDate || book.date || "出版时间缺失，需人工复核")} · ${escapeHtml(book.isbn || "ISBN 缺失")}<br />候选原因：${escapeHtml(book.candidateReason || "来源返回的相关候选书")} · 信息完整度：${escapeHtml(book.infoCompleteness || "poor")} · 来源可信度：${escapeHtml(book.sourceConfidence || "low")}<br />来源：${escapeHtml((book.dataSource || []).join("、") || book.source || "未知")} ${book.needsReview ? `· 需复核：${escapeHtml(book.reviewReason || "信息不完整")}` : ""}</span>
+                <span><strong>${escapeHtml(displayField(book.title))}</strong><br />作者：${escapeHtml(displayField(book.author))} · 出版社：${escapeHtml(displayField(book.publisher))} · 出版时间：${escapeHtml(displayField(book.publishDate || book.date))} · ISBN：${escapeHtml(displayField(book.isbn))}<br />候选原因：${escapeHtml(book.candidateReason || "来源返回的相关候选书")} · 信息完整度：${escapeHtml(book.infoCompleteness || "poor")} · 来源可信度：${escapeHtml(book.sourceConfidence || "low")}<br />来源：${escapeHtml((book.dataSource || []).join("、") || book.source || "未知")} ${book.needsReview ? `· 需复核：${escapeHtml(book.reviewReason || "信息不完整，需人工确认")}` : ""}</span>
               </label>`).join("")}</div>
             <div class="actions"><button class="button" data-action="import-search">导入已勾选候选书</button></div>
           </section>` : ""}
@@ -973,7 +1004,7 @@ function pageGenerate() {
         ${state.attachmentPreview.length ? `
           <section class="panel result-panel"><h3>解析预览：${state.attachmentPreview.length} 本</h3>
             ${bookPreviewMarkup(state.attachmentPreview)}
-            <div class="actions"><button class="button" data-action="confirm-attachment">确认导入前 20 本</button></div>
+            <div class="actions"><button class="button" data-action="confirm-attachment">确认导入候选书单</button></div>
           </section>` : ""}
       ` : ""}
 
@@ -996,10 +1027,12 @@ function pageGenerate() {
 
 function bookPreviewMarkup(books) {
   if (!books.length) return "";
-  return `<div class="cards">${books.slice(0, 20).map((book) => `
+  return `<div class="cards">${books.slice(0, MAX_CANDIDATE_BOOKS).map((book) => `
     <article class="card"><div class="card-top"><div><h3>${escapeHtml(book.title)}</h3>
-    <p>${escapeHtml(book.author)} · ${escapeHtml(book.publisher)}</p></div><span class="tag">${escapeHtml(book.isbn || book.category)}</span></div>
-    <p>${escapeHtml(book.summary || book.enrichmentRisk || "等待信息补全")}</p></article>`).join("")}</div>`;
+    <p>作者：${escapeHtml(displayField(book.author))} · 出版社：${escapeHtml(displayField(book.publisher))}</p></div><span class="tag">${escapeHtml(displayField(book.isbn || book.category))}</span></div>
+    <p>${escapeHtml(book.summary || book.enrichmentRisk || MISSING_TEXT)}</p>
+    <p>信息完整度：${escapeHtml(book.infoCompleteness || "poor")} · 来源可信度：${escapeHtml(book.sourceConfidence || "low")} · 候选原因：${escapeHtml(book.candidateReason || "人工导入候选书单")}</p>
+    ${book.needsReview ? `<p>需人工复核：${escapeHtml(book.reviewReason || "图书信息不完整，需人工确认")}</p>` : ""}</article>`).join("")}</div>`;
 }
 
 function pageScreen() {
@@ -1068,7 +1101,10 @@ function pageScreen() {
             <dt>推荐理由</dt><dd>${escapeHtml(selected.reason)}</dd>
             <dt>风险提醒</dt><dd>${escapeHtml(selected.risk)}</dd>
             <dt>建议书架</dt><dd>${escapeHtml(selected.shelf)}</dd>
-            <dt>基本信息</dt><dd>${escapeHtml(selected.author)} · ${escapeHtml(selected.publisher)} · ${escapeHtml(selected.date)}</dd>
+            <dt>基本信息</dt><dd>作者：${escapeHtml(displayField(selected.author))} · 出版社：${escapeHtml(displayField(selected.publisher))} · 出版时间：${escapeHtml(displayField(selected.date || selected.publishDate))}</dd>
+            <dt>信息完整度</dt><dd>${escapeHtml(selected.infoCompleteness || "poor")}</dd>
+            <dt>来源可信度</dt><dd>${escapeHtml(selected.sourceConfidence || "low")}</dd>
+            <dt>候选原因</dt><dd>${escapeHtml(selected.candidateReason || "人工导入的候选书")}</dd>
             <dt>信息补全</dt><dd>${escapeHtml(selected.enrichment || "未补全或无需补全")}</dd>
           </dl>
         </section>
@@ -1115,7 +1151,7 @@ function pageReview() {
             <div>
               <p class="eyebrow">第 4 步 · 人工复核</p>
               <h2>${escapeHtml(book.title)}</h2>
-              <p>${escapeHtml(book.author)} · ${escapeHtml(book.publisher)} · ${escapeHtml(book.category)}</p>
+              <p>作者：${escapeHtml(displayField(book.author))} · 出版社：${escapeHtml(displayField(book.publisher))} · 分类：${escapeHtml(displayField(book.category))}</p>
             </div>
             ${ratingTag(book.rating)}
           </div>

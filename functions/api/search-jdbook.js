@@ -50,7 +50,7 @@ function parseProducts(html, limit) {
 export async function onRequestGet(context) {
   const url = new URL(context.request.url);
   const query = url.searchParams.get("q")?.trim();
-  const limit = Math.min(20, Math.max(1, Number(url.searchParams.get("limit") || 10)));
+  const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") || 10)));
   if (!query) return jsonResponse({ error: "缺少查询关键词", items: [] }, 400);
 
   try {

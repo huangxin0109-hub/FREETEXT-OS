@@ -73,6 +73,6 @@ ${JSON.stringify(input.books, null, 2)}
 必须为每一本输入书籍返回一条结果，不可遗漏，不可新增书籍。
 输入中为“待补充”、空字符串或 null 的字段都视为缺失字段。只基于输入中已有的信息初筛。
 事实字段只能整理输入中已有的信息和公开 API 返回值。DeepSeek 不能联网搜索、不能依靠记忆猜测、不能自行补写简介、目录或书评；缺失内容必须填写“待人工确认”。
-info_completeness 为 poor 或 needs_review 为 true 时，必须将 candidate_decision 写为“待人工判断”，并在 risks 和 missing_information 中清楚说明信息不足。
+info_completeness 为 poor 或 needs_review 为 true 时，不得给 A 级强推荐；必须将 candidate_decision 写为“待人工判断”，并在 risks 和 missing_information 中清楚说明信息不足。
 `;
 }
