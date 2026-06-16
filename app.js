@@ -165,6 +165,20 @@ function displayField(value) {
   return useful(value) ? String(value) : MISSING_TEXT;
 }
 
+function candidateLimitMessage() {
+  return `当前版本最多支持 ${MAX_CANDIDATE_BOOKS} 本进入本轮初筛，已保留前 ${MAX_CANDIDATE_BOOKS} 本。`;
+}
+
+function addUniqueWarning(warnings, message) {
+  if (!warnings.includes(message)) warnings.push(message);
+}
+
+function limitCandidateBooks(books, warnings = null) {
+  if (books.length <= MAX_CANDIDATE_BOOKS) return books;
+  if (warnings) addUniqueWarning(warnings, candidateLimitMessage());
+  return books.slice(0, MAX_CANDIDATE_BOOKS);
+}
+
 function isHeaderRow(fields) {
   return fields[0]?.trim() === "书名" && fields.some((field) => field.trim() === "简介");
 }
@@ -303,15 +317,12 @@ function parseBookInput(text) {
     });
   });
 
-  if (books.length > MAX_CANDIDATE_BOOKS) {
-    warnings.push(`当前识别 ${books.length} 本，当前版本最多支持 ${MAX_CANDIDATE_BOOKS} 本进入本轮初筛，已先保留前 ${MAX_CANDIDATE_BOOKS} 本。`);
-    books.splice(MAX_CANDIDATE_BOOKS);
-  }
+  const limitedBooks = limitCandidateBooks(books, warnings);
   if (!books.length && !errors.length) {
     errors.push("请至少粘贴 1 本候选书。");
   }
 
-  return { books, errors, warnings };
+  return { books: limitedBooks, errors, warnings };
 }
 
 function normalizeSearchResult(item = {}, source = "公开图书来源") {
@@ -742,11 +753,13 @@ function importSelectedSearchBooks() {
     render({ scrollToTop: false });
     return;
   }
-  state.books = selected.map((book, index) => ({ ...book, id: `input-${index + 1}` }));
+  const warnings = [];
+  state.books = limitCandidateBooks(selected, warnings).map((book, index) => ({ ...book, id: `input-${index + 1}` }));
   state.originalBooks = structuredClone(state.books);
   state.inputMode = "search";
   state.inputErrors = [];
-  state.enrichmentMessage = `已人工确认并导入 ${state.books.length} 本候选书，可继续补全信息并交给 DeepSeek 初筛。`;
+  state.inputWarnings = warnings;
+  state.enrichmentMessage = `已人工确认并导入 ${state.books.length} / ${MAX_CANDIDATE_BOOKS} 本候选书，可继续补全信息并交给 DeepSeek 初筛。`;
   render({ scrollToTop: false });
 }
 
@@ -854,9 +867,11 @@ async function handleAttachment(file) {
 }
 
 function confirmAttachmentImport() {
-  state.books = state.attachmentPreview.slice(0, MAX_CANDIDATE_BOOKS).map((book, index) => ({ ...book, id: `input-${index + 1}` }));
+  const warnings = [];
+  state.books = limitCandidateBooks(state.attachmentPreview, warnings).map((book, index) => ({ ...book, id: `input-${index + 1}` }));
   state.originalBooks = structuredClone(state.books);
   state.inputMode = "attachment";
+  state.inputWarnings = warnings;
   state.enrichmentMessage = `已从附件导入 ${state.books.length} / ${MAX_CANDIDATE_BOOKS} 本候选书，可继续补全并初筛。`;
   render({ scrollToTop: false });
 }
@@ -1436,7 +1451,7 @@ function screeningInput() {
       focus_topics: ["文学", "文史哲", "社科", "艺术"],
       exclude_topics: ["低质量拼凑", "纯流量畅销", "应试工具书"],
     },
-    books: state.books.map((book) => ({
+    books: state.books.slice(0, MAX_CANDIDATE_BOOKS).map((book) => ({
       id: book.id,
       title: book.title,
       isbn: book.isbn,
@@ -1602,9 +1617,12 @@ document.addEventListener("click", async (event) => {
       render();
       return;
     }
+    if (state.inputMode !== "demo") {
+      state.books = limitCandidateBooks(state.books, state.inputWarnings);
+    }
     state.originalBooks = structuredClone(state.books);
     if (state.inputMode !== "demo") {
-      state.books = await enrichBooks(state.books);
+      state.books = limitCandidateBooks(await enrichBooks(state.books), state.inputWarnings);
     }
     await screenWithDeepSeek();
   }
