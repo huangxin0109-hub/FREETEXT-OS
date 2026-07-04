@@ -1,2 +1,11 @@
 .dev.vars
 .wrangler/
+node_modules/
+.npm-cache/
+.venv-markitdown*/
+.ms-playwright/
+artifacts/playwright-report/
+artifacts/document-ingestion/
+artifacts/test-results/
+test-results/
+playwright-report/
