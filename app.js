@@ -516,7 +516,7 @@ function mergeBookData(base, additions) {
     : contentCount >= 4
       ? "partial"
       : "poor";
-  const mediumConfidenceSources = ["当当图书搜索", "京东图书搜索", "Google Books", "Open Library"];
+  const mediumConfidenceSources = ["豆瓣移动端图书搜索", "当当图书搜索", "京东图书搜索", "Google Books", "Open Library"];
   merged.sourceConfidence = merged.dataSource.length >= 2
     ? "high"
     : merged.dataSource.some((source) => mediumConfidenceSources.includes(source))
@@ -577,7 +577,7 @@ async function lookupOpenLibrary(query, limit = 5) {
 }
 
 async function lookupDouban(query, limit = 5) {
-  return lookupProxy("/api/search-douban", query, limit, "豆瓣图书搜索代理");
+  return lookupProxy("/api/search-douban", query, limit, "豆瓣移动端图书搜索");
 }
 
 async function lookupDangdang(query, limit = 5) {
@@ -670,19 +670,12 @@ async function searchOnlineBooks() {
   try {
     const sourceWarnings = new Set();
     const searchSources = async (term) => {
-      const sources = [
-        ["当当图书搜索", lookupDangdang(term, Math.max(limit, MAX_CANDIDATE_BOOKS))],
-        ["京东图书搜索", lookupJdBook(term, Math.max(limit, MAX_CANDIDATE_BOOKS))],
-        ["豆瓣图书搜索代理", lookupDouban(term, Math.max(limit, MAX_CANDIDATE_BOOKS))],
-        ["Google Books", lookupGoogle(term, Math.max(limit, 40))],
-        ["Open Library", lookupOpenLibrary(`q=${encodeURIComponent(term)}`, 100)],
-      ];
-      const results = await Promise.allSettled(sources.map(([, request]) => request));
-      return results.flatMap((result, index) => {
-        if (result.status === "fulfilled") return result.value;
-        sourceWarnings.add(`${sources[index][0]}暂时不可用：${result.reason?.message || "请稍后重试"}`);
+      try {
+        return await lookupDouban(term, Math.max(limit, MAX_CANDIDATE_BOOKS));
+      } catch (error) {
+        sourceWarnings.add(`豆瓣移动端暂时不可用：${error.message || "请稍后重试"}`);
         return [];
-      });
+      }
     };
     let combined = await searchSources(query);
     const topicTranslations = {
@@ -725,7 +718,7 @@ async function searchOnlineBooks() {
     state.searchSourceWarnings = [...sourceWarnings];
     state.searchStatus = "success";
     if (!state.searchResults.length) {
-      state.inputErrors = ["五个图书来源暂未返回符合年月范围的结果，请放宽年月、换关键词，或使用粘贴/附件导入。"];
+      state.inputErrors = ["豆瓣移动端暂未返回符合条件的图书，请放宽年月、换关键词，或使用粘贴/附件导入。"];
     }
     render({ scrollToTop: false });
   } catch {
@@ -994,8 +987,8 @@ function pageGenerate() {
             本步骤用于发现候选书，不代表 AI 已完成筛选。请先人工勾选确认，再交给 AI 初筛。<br />
             如果图书简介、目录、书评等信息不足，系统会标记为需人工复核，AI 不会凭空补全事实。
           </div>
-          <p>查询顺序：当当图书、京东图书、豆瓣图书、Google Books、Open Library。任一来源失败不会阻断流程；查询结果只能作为候选信息，必须人工勾选后才会进入初筛。</p>
-          ${state.searchSourceWarnings.length ? `<p>来源提示：${state.searchSourceWarnings.map(escapeHtml).join("；")}，其他来源结果仍可继续使用。</p>` : ""}
+          <p>当前只从豆瓣移动端图书搜索做关键词模糊筛选。查询结果只能作为候选信息，必须人工勾选后才会进入初筛。</p>
+          ${state.searchSourceWarnings.length ? `<p>来源提示：${state.searchSourceWarnings.map(escapeHtml).join("；")}，可换关键词，或继续使用粘贴书单和附件导入。</p>` : ""}
           <div class="actions"><button class="button" data-action="search-online">${state.searchStatus === "loading" ? "正在查询候选信息…" : "搜索候选书"}</button></div>
         </section>
         ${state.searchResults.length ? `
